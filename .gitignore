@@ -1,0 +1,10 @@
+# Claude Code state (credentials, history, config) lives here once in use.
+.claude/*
+!.claude/.gitkeep
+
+# Bind-mount targets are created/removed at runtime.
+mounts/*
+!mounts/.gitkeep
+
+# Created lazily by dockerclaude.sh.
+mounts.sqlite3

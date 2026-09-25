@@ -1,0 +1,16 @@
+services:
+  dockerclaude:
+    image: dockerclaude:latest
+    container_name: dockerclaude
+    read_only: false
+    restart: unless-stopped
+    security_opt: [no-new-privileges]
+    volumes:
+      - type: bind
+        source: ./.claude
+        target: /workspace/.claude
+      - type: bind
+        source: ./mounts
+        target: /mnt
+        bind:
+          propagation: rslave
