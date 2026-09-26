@@ -1,5 +1,10 @@
 services:
   dockerclaude:
+    environment:
+      - TERM
+      - TERM_PROGRAM
+      - TERM_PROGRAM_VERSION
+      - TMUX
     image: dockerclaude:latest
     container_name: dockerclaude
     read_only: false
