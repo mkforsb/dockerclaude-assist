@@ -86,6 +86,15 @@ Run an arbitrary command in the container:
 dockerclaude.sh exec bash
 ```
 
+List mounted projects with their reference counts, and report broken mounts
+(e.g. a mount left behind by a crashed session, or a database entry whose
+mount is gone). It also checks that `./mounts` is set up as a shared mount:
+
+```sh
+dockerclaude.sh mounts
+# /home/me/src/foo -> /mnt/-home-me-src-foo (refcount 2)
+```
+
 Stop the container:
 
 ```sh
