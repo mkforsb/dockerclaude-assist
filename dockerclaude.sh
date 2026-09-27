@@ -2,6 +2,25 @@
 set -euo pipefail
 
 DC2DIR="$(dirname "$(realpath "$0")")"
+DC2MOUNTSDIR="$DC2DIR/mounts"
+DC2MOUNTSDB="$DC2DIR/mounts.sqlite3"
+
+function slugify {
+    echo "$1" | sed -E 's/[^A-Za-z0-9]/-/g'
+}
+
+function bound_source {
+    local boundSourceDevice boundFsRoot rootMountPoint hostPath
+
+    read -r boundSourceDevice boundFsRoot < <(findmnt -rn -o MAJ:MIN,FSROOT --mountpoint "$1")
+    read -r rootMountPoint < <(findmnt -rn -o MAJ:MIN,FSROOT,TARGET \
+        | awk -v dev="${boundSourceDevice}" '$1 == dev && $2 == "/" { print $3; exit }')
+
+    # findmnt -r escapes special characters, e.g. a space becomes \x20
+    printf -v hostPath '%b' "${rootMountPoint%/}${boundFsRoot}"
+
+    [ "$(slugify "${hostPath}")" == "$2" ] && echo "${hostPath}"
+}
 
 function perform_install {
     if [ -f "$DC2DIR/installers/${1}.sh" ]; then
@@ -14,15 +33,12 @@ function perform_install {
 }
 
 function start_session {
-    DC2MOUNTSDIR="$DC2DIR/mounts"
-    DC2MOUNTSDB="$DC2DIR/mounts.sqlite3"
-
     sqlite3 "${DC2MOUNTSDB}" " \
         create table if not exists mounts (slug text primary key, reference_count int); \
     "
 
     targetDir=$(realpath "${1:-.}")
-    slug=$(echo "${targetDir}" | sed -E 's/[^A-Za-z0-9]/-/g')
+    slug=$(slugify "${targetDir}")
     mountPoint="$DC2MOUNTSDIR/${slug}"
 
     cleanup() {
@@ -75,6 +91,54 @@ if [ "${1:-}" == "install" ]; then
 elif [ "${1:-}" == "exec" ]; then
     shift
     docker compose -f "${DC2DIR}/docker-compose.yml" exec -it dockerclaude "$@"
+elif [ "${1:-}" == "mounts" ]; then
+    # ./mounts must be a shared mount point (see `make setup-mounts`), otherwise
+    # project mounts will not propagate into the running container.
+    if ! mountpoint -q "${DC2MOUNTSDIR}" || \
+        [[ "$(findmnt -n -o PROPAGATION --mountpoint "${DC2MOUNTSDIR}")" != *shared* ]]; then
+        echo "${DC2MOUNTSDIR} is not mounted properly! (run 'make setup-mounts')" >&2
+        exit 1
+    fi
+
+    mapfile -t mountsOnDisk < <(
+        find "${DC2MOUNTSDIR}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
+    )
+
+    # A missing or unreadable database is treated as empty.
+    mapfile -t mountsRefCount < <(
+        sqlite3 -readonly "${DC2MOUNTSDB}" \
+            "select slug, reference_count from mounts order by slug;" 2>/dev/null
+    )
+
+    if [ "${#mountsOnDisk[@]}" -eq 0 ] && [ "${#mountsRefCount[@]}" -eq 0 ]; then
+        echo 'No mounts'
+        exit 0
+    fi
+
+    declare -A onDisk=() inDb=()
+    for slug in "${mountsOnDisk[@]}"; do
+        onDisk["${slug}"]=1
+    done
+
+    for row in "${mountsRefCount[@]}"; do
+        IFS='|' read -r slug refcount <<< "${row}"
+        inDb["${slug}"]=1
+
+        if [ -z "${onDisk[${slug}]:-}" ]; then
+            echo "Broken mount! ${slug} with refcount ${refcount} is not present in filesystem!"
+        elif ! mountpoint -q "${DC2MOUNTSDIR}/${slug}"; then
+            echo "Broken mount! ${slug} with refcount ${refcount} exists but is not mounted!"
+        else
+            srcDir=$(bound_source "${DC2MOUNTSDIR}/${slug}" "${slug}") || srcDir="${slug}"
+            echo "${srcDir} -> /mnt/${slug} (refcount ${refcount})"
+        fi
+    done
+
+    for slug in "${mountsOnDisk[@]}"; do
+        if [ -z "${inDb[${slug}]:-}" ]; then
+            echo "Broken mount! ${slug} not present in refcount database!"
+        fi
+    done
 else
     start_session "$@"
 fi
