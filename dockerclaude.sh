@@ -40,7 +40,7 @@ function start_session {
 
         if [ "${refCount}" == "" ] && mountpoint -q "${mountPoint}"; then
             # Only remove the directory once the unmount has actually succeeded;
-            # otherwise the rm would reach thr@ough the bind mount into the real
+            # otherwise the rm would reach through the bind mount into the real
             # project directory.
             if sudo umount "${mountPoint}"; then
                 rmdir "${mountPoint}"
