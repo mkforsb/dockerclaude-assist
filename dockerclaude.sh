@@ -139,6 +139,8 @@ elif [ "${1:-}" == "mounts" ]; then
             echo "Broken mount! ${slug} not present in refcount database!"
         fi
     done
-else
+elif [ -d "$@" ]; then
     start_session "$@"
+else
+    echo "Invalid path or command \`$@\`"
 fi
