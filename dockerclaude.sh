@@ -91,7 +91,13 @@ if [ "${1:-}" == "install" ]; then
 elif [ "${1:-}" == "exec" ]; then
     shift
     docker compose -f "${DC2DIR}/docker-compose.yml" exec -it dockerclaude "$@"
-elif [ "${1:-}" == "mounts" ]; then
+elif [ "${1:-}" == "make" ]; then
+    shift
+    cd "${DC2DIR}" && make "$@"
+elif [ "${1:-}" == "dir" ]; then
+    shift
+    echo "${DC2DIR}"
+elif [ "${1:-}" == "ps" ]; then
     # ./mounts must be a shared mount point (see `make setup-mounts`), otherwise
     # project mounts will not propagate into the running container.
     if ! mountpoint -q "${DC2MOUNTSDIR}" || \
@@ -111,7 +117,7 @@ elif [ "${1:-}" == "mounts" ]; then
     )
 
     if [ "${#mountsOnDisk[@]}" -eq 0 ] && [ "${#mountsRefCount[@]}" -eq 0 ]; then
-        echo 'No mounts'
+        echo 'None'
         exit 0
     fi
 
