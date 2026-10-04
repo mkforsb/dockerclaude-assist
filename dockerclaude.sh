@@ -98,6 +98,12 @@ elif [ "${1:-}" == "dir" ]; then
     shift
     echo "${DC2DIR}"
 elif [ "${1:-}" == "ps" ]; then
+    docker ps -a -f name=dockerclaude
+
+    (IFS=$'\n' && for s in $(docker logs dockerclaude | tail -n2); do echo "> $s"; done)
+
+    echo
+    echo "Sessions/mounts:"
     # ./mounts must be a shared mount point (see `make setup-mounts`), otherwise
     # project mounts will not propagate into the running container.
     if ! mountpoint -q "${DC2MOUNTSDIR}" || \

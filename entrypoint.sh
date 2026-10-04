@@ -18,7 +18,7 @@ ln -s /workspace/.claude/.claude.json /workspace/.claude.json
 curl -fsSL https://claude.ai/install.sh | bash
 
 while true; do
-    claude update || echo "entrypoint: claude update failed (exit $?)" >&2
+    claude update | ts || echo "entrypoint: claude update failed (exit $?)" >&2 | ts
     # Backgrounded so the TERM trap fires immediately on `docker stop`.
     sleep 30m &
     wait $!
