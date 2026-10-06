@@ -32,57 +32,107 @@ function perform_install {
     fi
 }
 
-function start_session {
+function init_mounts_db {
     sqlite3 "${DC2MOUNTSDB}" " \
         create table if not exists mounts (slug text primary key, reference_count int); \
     "
+}
 
-    targetDir=$(realpath "${1:-.}")
-    slug=$(slugify "${targetDir}")
+# Prints the reference count for slug $1, or nothing if it has no references.
+function mount_refcount {
+    sqlite3 "${DC2MOUNTSDB}" " \
+        select reference_count from mounts \
+        where slug = '${1}'; \
+    "
+}
+
+# Bind-mounts the absolute host directory $1 under ./mounts (unless it is
+# already mounted) and takes a reference on it.
+function acquire_mount {
+    local slug mountPoint
+    slug=$(slugify "$1")
     mountPoint="$DC2MOUNTSDIR/${slug}"
 
-    cleanup() {
-        sqlite3 "${DC2MOUNTSDB}" " \
-            update mounts set reference_count = reference_count - 1 \
-            where slug = '${slug}'; \
-            \
-            delete from mounts where reference_count <= 0; \
-        "
-
-        refCount=$(sqlite3 "${DC2MOUNTSDB}" " \
-            select reference_count from mounts \
-            where slug = '${slug}'; \
-        ")
-
-        if [ "${refCount}" == "" ] && mountpoint -q "${mountPoint}"; then
-            # Only remove the directory once the unmount has actually succeeded;
-            # otherwise the rm would reach through the bind mount into the real
-            # project directory.
-            if sudo umount "${mountPoint}"; then
-                rmdir "${mountPoint}"
-            else
-                echo "dockerclaude: failed to unmount ${mountPoint}, leaving it in place" >&2
-            fi
-        fi
-    }
+    init_mounts_db
 
     if ! mountpoint -q "${mountPoint}"; then
         mkdir -p "${mountPoint}"
-        sudo mount --bind "${targetDir}" "${mountPoint}"
+        sudo mount --bind "$1" "${mountPoint}"
     fi
-
-    # From here on, always release the mount/refcount on exit, including when
-    # the session is interrupted or the exec fails.
-    trap cleanup EXIT
 
     sqlite3 "${DC2MOUNTSDB}" " \
         insert into mounts (slug, reference_count)  \
         values ('${slug}', 1) \
         on conflict(slug) do update set reference_count = reference_count + 1; \
     "
+}
+
+# Drops a reference on the absolute host directory $1 and unmounts it once no
+# references remain.
+function release_mount {
+    local slug mountPoint
+    slug=$(slugify "$1")
+    mountPoint="$DC2MOUNTSDIR/${slug}"
+
+    init_mounts_db
+
+    sqlite3 "${DC2MOUNTSDB}" " \
+        update mounts set reference_count = reference_count - 1 \
+        where slug = '${slug}'; \
+        \
+        delete from mounts where reference_count <= 0; \
+    "
+
+    if [ "$(mount_refcount "${slug}")" == "" ] && mountpoint -q "${mountPoint}"; then
+        # Only remove the directory once the unmount has actually succeeded;
+        # otherwise the rm would reach through the bind mount into the real
+        # project directory.
+        if sudo umount "${mountPoint}"; then
+            rmdir "${mountPoint}"
+        else
+            echo "dockerclaude: failed to unmount ${mountPoint}, leaving it in place" >&2
+            return 1
+        fi
+    fi
+}
+
+# Parses `[<container-name>] <path>` for subcommand $1 into the globals
+# container and targetPath.
+function parse_mount_args {
+    local cmd="$1"
+    shift
+
+    case $# in
+        1) container=dockerclaude; targetPath="$1" ;;
+        2) container="$1"; targetPath="$2" ;;
+        *)
+            if [ ! "$cmd" == "" ]; then
+                echo "usage: dockerclaude.sh ${cmd} [<container-name>] <path>" >&2
+            else
+                echo "usage: dockerclaude.sh [<container-name>] <path>" >&2
+            fi
+            exit 1
+            ;;
+    esac
+
+    if [ ! -d "${targetPath}" ]; then
+        echo "Invalid path \`${targetPath}\`" >&2
+        exit 1
+    fi
+}
+
+function start_session {
+    local targetDir
+    targetDir=$(realpath "${1:-.}")
+
+    acquire_mount "${targetDir}"
+
+    # From here on, always release the mount/refcount on exit, including when
+    # the session is interrupted or the exec fails.
+    trap "release_mount $(printf '%q' "${targetDir}")" EXIT
 
     docker compose -f "${DC2DIR}/docker-compose.yml" exec -it dockerclaude \
-        bash -c "cd /mnt/${slug} && claude"
+        bash -c "cd /mnt/$(slugify "${targetDir}") && claude"
 }
 
 if [ "${1:-}" == "install" ]; then
@@ -97,6 +147,36 @@ elif [ "${1:-}" == "make" ]; then
 elif [ "${1:-}" == "dir" ]; then
     shift
     echo "${DC2DIR}"
+elif [ "${1:-}" == "mount" ]; then
+    shift
+    parse_mount_args mount "$@"
+
+    targetDir=$(realpath "${targetPath}")
+    slug=$(slugify "${targetDir}")
+    acquire_mount "${targetDir}"
+    echo "${targetDir} -> ${container}:/mnt/${slug} (refcount $(mount_refcount "${slug}"))"
+elif [ "${1:-}" == "umount" ]; then
+    shift
+    parse_mount_args umount "$@"
+
+    # -m: allow unmounting even if the source directory has since been removed
+    targetDir=$(realpath -m "${targetPath}")
+    slug=$(slugify "${targetDir}")
+    init_mounts_db
+
+    if [ -z "$(mount_refcount "${slug}")" ] && ! mountpoint -q "${DC2MOUNTSDIR}/${slug}"; then
+        echo "${targetDir} is not mounted" >&2
+        exit 1
+    fi
+
+    release_mount "${targetDir}"
+
+    refCount=$(mount_refcount "${slug}")
+    if [ -n "${refCount}" ]; then
+        echo "${targetDir} is still in use (refcount ${refCount})"
+    else
+        echo "Unmounted ${targetDir} from ${container}:/mnt/${slug}"
+    fi
 elif [ "${1:-}" == "ps" ]; then
     docker ps -a -f name=dockerclaude
 
@@ -152,7 +232,8 @@ elif [ "${1:-}" == "ps" ]; then
         fi
     done
 elif [ -d "$@" ]; then
-    start_session "$@"
+    parse_mount_args "" "$@"
+    start_session "${targetPath}"
 else
     echo "Invalid path or command \`$@\`"
 fi

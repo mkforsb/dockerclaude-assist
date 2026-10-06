@@ -86,12 +86,24 @@ Run an arbitrary command in the container:
 dockerclaude.sh exec bash
 ```
 
+Mount a directory into the container without starting a session, e.g. to give
+an already-running session access to another project. This takes a reference
+on the mount just like a session does, so it stays mounted until it is
+explicitly unmounted (and no session is using it). The container name
+defaults to `dockerclaude`:
+
+```sh
+dockerclaude.sh mount [CONTAINER] DIR
+# /home/me/src/bar -> dockerclaude:/mnt/-home-me-src-bar (refcount 1)
+dockerclaude.sh umount [CONTAINER] DIR
+```
+
 List mounted projects with their reference counts, and report broken mounts
 (e.g. a mount left behind by a crashed session, or a database entry whose
 mount is gone). It also checks that `./mounts` is set up as a shared mount:
 
 ```sh
-dockerclaude.sh mounts
+dockerclaude.sh ps
 # /home/me/src/foo -> /mnt/-home-me-src-foo (refcount 2)
 ```
 
