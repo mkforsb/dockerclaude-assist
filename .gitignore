@@ -8,3 +8,4 @@ mounts/*
 
 # Created lazily by dockerclaude.sh.
 mounts.sqlite3
+session-history/

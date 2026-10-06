@@ -135,6 +135,41 @@ function start_session {
         bash -c "cd /mnt/$(slugify "${targetDir}") && claude"
 }
 
+# Wipes ./.claude except for credentials, config and skills, after stashing a
+# compressed copy of the session history in ./session-history.
+function dot_claude_clean {
+    local claudeDir="${DC2DIR}/.claude"
+    local historyDir="${DC2DIR}/session-history"
+    local ans f archive
+    local -a toArchive=()
+
+    read -r -p "Really wipe ${claudeDir}? Y/n? " -n 1 ans </dev/tty
+    echo
+    [ "${ans}" == "Y" ] || return 0
+
+    for f in file-history history.jsonl plans projects session-env sessions shell-snapshots; do
+        if [ -e "${claudeDir}/${f}" ]; then
+            toArchive+=(".claude/${f}")
+        fi
+    done
+
+    # set -e aborts before anything is removed if the archive can't be written.
+    if [ "${#toArchive[@]}" -gt 0 ]; then
+        mkdir -p "${historyDir}"
+        archive="${historyDir}/$(date +%Y%m%d-%H%M%S).tar.gz"
+        tar -C "${DC2DIR}" -czf "${archive}" "${toArchive[@]}"
+        echo "Saved session history to ${archive}"
+    fi
+
+    find "${claudeDir}" -mindepth 1 -maxdepth 1 \
+        ! -name ".credentials.json" \
+        ! -name ".claude.json" \
+        ! -name "settings.json" \
+        ! -name "skills" \
+        ! -name ".gitkeep" \
+        -exec rm -vrf {} +
+}
+
 if [ "${1:-}" == "install" ]; then
     shift
     perform_install "$@"
@@ -147,6 +182,8 @@ elif [ "${1:-}" == "make" ]; then
 elif [ "${1:-}" == "dir" ]; then
     shift
     echo "${DC2DIR}"
+elif [ "${1:-}" == "dot-claude-clean" ]; then
+    dot_claude_clean
 elif [ "${1:-}" == "mount" ]; then
     shift
     parse_mount_args mount "$@"

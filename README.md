@@ -107,6 +107,15 @@ dockerclaude.sh ps
 # /home/me/src/foo -> /mnt/-home-me-src-foo (refcount 2)
 ```
 
+Wipe `./.claude`, keeping only credentials, `.claude.json`, `settings.json`
+and `skills`. Session history (`history.jsonl`, `projects`, `sessions`,
+`file-history`, `plans`, `session-env`, `shell-snapshots`) is first archived
+to `./session-history/<timestamp>.tar.gz`:
+
+```sh
+dockerclaude.sh dot-claude-clean
+```
+
 Stop the container:
 
 ```sh
