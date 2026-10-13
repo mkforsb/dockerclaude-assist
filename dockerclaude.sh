@@ -215,7 +215,7 @@ elif [ "${1:-}" == "umount" ]; then
         echo "Unmounted ${targetDir} from ${container}:/mnt/${slug}"
     fi
 elif [ "${1:-}" == "ps" ]; then
-    docker ps -a -f name=dockerclaude
+    docker ps -as -f name=dockerclaude
 
     (IFS=$'\n' && for s in $(docker logs dockerclaude | tail -n2); do echo "> $s"; done)
 
