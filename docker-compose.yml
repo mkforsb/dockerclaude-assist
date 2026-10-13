@@ -5,6 +5,7 @@ services:
       - TERM_PROGRAM
       - TERM_PROGRAM_VERSION
       - TMUX
+      - TZ=Europe/Stockholm
     image: dockerclaude:latest
     container_name: dockerclaude
     read_only: false
