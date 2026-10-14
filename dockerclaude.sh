@@ -145,7 +145,7 @@ function dot_claude_clean {
 
     read -r -p "Really wipe ${claudeDir}? Y/n? " -n 1 ans </dev/tty
     echo
-    [ "${ans}" == "Y" ] || return 0
+    [ "${ans}" == "Y" ] || echo "You declined the cleanup" && return 0
 
     for f in file-history history.jsonl plans projects session-env sessions shell-snapshots; do
         if [ -e "${claudeDir}/${f}" ]; then
