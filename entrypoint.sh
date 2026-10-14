@@ -11,7 +11,7 @@ terminate() {
 }
 trap terminate TERM INT
 
-ln -s /workspace/.claude/.claude.json /workspace/.claude.json
+ln -fs /workspace/.claude/.claude.json /workspace/.claude.json
 
 # Installs to ~/.local/bin/claude with versions in ~/.local/share/claude,
 # so the bind mount over ~/.claude does not shadow the binary.
