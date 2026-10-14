@@ -18,7 +18,7 @@ function usage {
     cat >&2 <<EOF
 usage: docker-tmpfs.sh volume <volume> [<size>]
        docker-tmpfs.sh container-state <container> [<size>]
-       docker-tmpfs.sh unmount volume|container-state <name>
+       docker-tmpfs.sh umount volume|container-state <name>
        docker-tmpfs.sh ls
        docker-tmpfs.sh init
 
@@ -125,7 +125,7 @@ function do_mount {
     echo "${kind} ${name} is now on a tmpfs (${dir})"
 }
 
-function do_unmount {
+function do_umount {
     local kind="$1" name="$2" dir
 
     dir=$(stopped_target_dir "${kind}" "${name}")
@@ -175,7 +175,7 @@ _docker_tmpfs() {
 
     case "${COMP_CWORD}" in
         1)
-            words=(volume container-state unmount ls)
+            words=(volume container-state umount ls)
             ;;
         2)
             case "${COMP_WORDS[1]}" in
@@ -186,14 +186,14 @@ _docker_tmpfs() {
                     mapfile -t words < <(docker ps -a --filter status=exited \
                         --filter status=created --format '{{.Names}}' 2>/dev/null)
                     ;;
-                unmount)
+                umount)
                     words=(volume container-state)
                     ;;
             esac
             ;;
         3)
             # Only what is actually on a tmpfs, going by `ls`.
-            if [ "${COMP_WORDS[1]}" == "unmount" ]; then
+            if [ "${COMP_WORDS[1]}" == "umount" ]; then
                 mapfile -t words < <("${_docker_tmpfs_self}" ls 2>/dev/null \
                     | awk -v kind="${COMP_WORDS[2]}" '$3 == kind { print $4 }')
             fi
@@ -211,9 +211,9 @@ case "${1:-}" in
         [ $# -ge 2 ] && [ $# -le 3 ] || usage
         do_mount "$@"
         ;;
-    unmount)
+    umount)
         [ $# -eq 3 ] || usage
-        do_unmount "$2" "$3"
+        do_umount "$2" "$3"
         ;;
     ls)
         do_ls
