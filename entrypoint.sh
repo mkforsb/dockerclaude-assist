@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -u
 
+# Sets umask for this script only, has no effect on e.g. `docker exec ...`
+umask 002
+
 # Allow `docker run <image> <cmd ...>` to override the keepalive loop.
 if [ "$#" -gt 0 ]; then
     exec "$@"

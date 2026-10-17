@@ -25,10 +25,10 @@ function bound_source {
 function perform_install {
     if [ -f "$DC2DIR/installers/${1}.sh" ]; then
         docker compose -f "${DC2DIR}/docker-compose.yml" exec -it dockerclaude \
-            bash -c "/installers/${1}.sh"
+            bash -c "umask 002 && /installers/${1}.sh"
     else
         docker compose -f "${DC2DIR}/docker-compose.yml" exec -it dockerclaude \
-            bash -c "apt update && apt install -y $*"
+            bash -c "umask 002 && apt update && apt install -y $*"
     fi
 }
 
@@ -132,7 +132,7 @@ function start_session {
     trap "release_mount $(printf '%q' "${targetDir}")" EXIT
 
     docker compose -f "${DC2DIR}/docker-compose.yml" exec -it dockerclaude \
-        bash -c "cd /mnt/$(slugify "${targetDir}") && claude"
+        bash -c "umask 002 && cd /mnt/$(slugify "${targetDir}") && claude"
 }
 
 # Wipes ./.claude except for credentials, config and skills, after stashing a
@@ -179,7 +179,7 @@ if [ "${1:-}" == "install" ]; then
     perform_install "$@"
 elif [ "${1:-}" == "exec" ]; then
     shift
-    docker compose -f "${DC2DIR}/docker-compose.yml" exec -it dockerclaude "$@"
+    docker compose -f "${DC2DIR}/docker-compose.yml" exec -it dockerclaude bash -c 'umask 002 && exec "$@"' bash "$@"
 elif [ "${1:-}" == "make" ]; then
     shift
     cd "${DC2DIR}" && make "$@"
