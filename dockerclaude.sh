@@ -153,7 +153,7 @@ function dot_claude_clean {
 
     for f in file-history history.jsonl plans projects session-env sessions shell-snapshots; do
         if [ -e "${claudeDir}/${f}" ]; then
-            toArchive+=(".claude/${f}")
+            toArchive+=("dot-claude/${f}")
         fi
     done
 
