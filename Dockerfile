@@ -3,6 +3,7 @@ FROM debian:testing
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         moreutils \
+        procps \
         ca-certificates \
         curl \
         build-essential \
