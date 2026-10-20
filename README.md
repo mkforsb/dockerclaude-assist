@@ -62,7 +62,14 @@ not the rest of your filesystem.
 4. Log in. Either run `./dockerclaude.sh` and go through the login flow, or
    [copy your auth from the host](#how-to-copy-auth-from-host-machine).
 
-5. Optionally, put `dockerclaude.sh` on your `PATH`, e.g.:
+5. Optionally, for a `dockerclaude` command with bash completion, add this to
+   `~/.bashrc`:
+
+   ```sh
+   source <(/path/to/dockerclaude.sh init)
+   ```
+
+   Or just put `dockerclaude.sh` on your `PATH`, e.g.:
 
    ```sh
    ln -s "$PWD/dockerclaude.sh" ~/.local/bin/dockerclaude

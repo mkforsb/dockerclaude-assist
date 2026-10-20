@@ -1,7 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-DC2DIR="$(dirname "$(realpath "$0")")"
+DC2SELF="$(realpath "$0")"
+DC2DIR="$(dirname "${DC2SELF}")"
 DC2MOUNTSDIR="$DC2DIR/mounts"
 DC2MOUNTSDB="$DC2DIR/mounts.sqlite3"
 
@@ -268,6 +269,96 @@ function dot_claude_clean {
         -exec rm -vrf {} +
 }
 
+# Prints the names of all sessions in the mounts database, without creating it
+# if it is missing.
+function list_sessions {
+    mounts_db -readonly " \
+        select distinct substr(session, instr(session, ':') + 1) from mounts \
+        where session is not null order by 1;" 2>/dev/null || true
+}
+
+# Prints the host directories currently mounted under ./mounts.
+function list_mounted_dirs {
+    local slug
+
+    find "${DC2MOUNTSDIR}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort \
+        | while read -r slug; do
+            if mountpoint -q "${DC2MOUNTSDIR}/${slug}"; then
+                bound_source "${DC2MOUNTSDIR}/${slug}" "${slug}" || true
+            fi
+        done
+}
+
+# Prints shell code that defines a `dockerclaude` function running this script
+# by its full path, and bash completion for it and dockerclaude.sh.
+function print_init {
+    printf '_dockerclaude_self=%q\n' "${DC2SELF}"
+    printf '_dockerclaude_dir=%q\n' "${DC2DIR}"
+    cat <<'EOF'
+dockerclaude() {
+    "${_dockerclaude_self}" "$@"
+}
+
+_dockerclaude() {
+    local cur="${COMP_WORDS[COMP_CWORD]}" w
+    local -a words=()
+    COMPREPLY=()
+
+    case "${COMP_CWORD}" in
+        1)
+            words=(install exec make dir dot-claude-clean mount umount rename-session ps init)
+            compopt -o filenames
+            mapfile -t COMPREPLY < <(compgen -d -- "${cur}")
+            ;;
+        2)
+            case "${COMP_WORDS[1]}" in
+                install)
+                    mapfile -t words < <(find "${_dockerclaude_dir}/installers" \
+                        -maxdepth 1 -name '*.sh' -printf '%f\n' 2>/dev/null | sed 's/\.sh$//')
+                    ;;
+                make)
+                    mapfile -t words < <(sed -nE 's/^([A-Za-z0-9_-]+):.*/\1/p' \
+                        "${_dockerclaude_dir}/Makefile" 2>/dev/null)
+                    ;;
+                mount)
+                    compopt -o filenames
+                    mapfile -t COMPREPLY < <(compgen -d -- "${cur}")
+                    ;;
+                umount)
+                    # Only what is actually mounted.
+                    mapfile -t words < <("${_dockerclaude_self}" __list mounts 2>/dev/null)
+                    ;;
+                rename-session)
+                    mapfile -t words < <("${_dockerclaude_self}" __list sessions 2>/dev/null)
+                    ;;
+                exec|dir|dot-claude-clean|ps|init)
+                    ;;
+                *)
+                    # dockerclaude.sh <path> <session-name>
+                    mapfile -t words < <("${_dockerclaude_self}" __list sessions 2>/dev/null)
+                    ;;
+            esac
+            ;;
+        3)
+            if [ "${COMP_WORDS[1]}" == "mount" ]; then
+                mapfile -t words < <("${_dockerclaude_self}" __list sessions 2>/dev/null)
+            fi
+            ;;
+    esac
+
+    # Session names and paths may contain spaces, so quote them. cur is the
+    # word as typed, i.e. quoted as well.
+    for w in "${words[@]}"; do
+        printf -v w '%q' "${w}"
+        if [[ "${w}" == "${cur}"* ]]; then
+            COMPREPLY+=("${w}")
+        fi
+    done
+}
+complete -F _dockerclaude dockerclaude.sh dockerclaude
+EOF
+}
+
 if [ "${1:-}" == "install" ]; then
     shift
     perform_install "$@"
@@ -400,6 +491,14 @@ elif [ "${1:-}" == "ps" ]; then
             echo "Broken mount! ${slug} not present in refcount database!"
         fi
     done
+elif [ "${1:-}" == "init" ]; then
+    print_init
+elif [ "${1:-}" == "__list" ]; then
+    # Used by the completion from `init`.
+    case "${2:-}" in
+        sessions) list_sessions ;;
+        mounts) list_mounted_dirs ;;
+    esac
 elif [ $# -le 2 ] && [ -d "${1:-.}" ]; then
     start_session "${1:-.}" "${2:-}"
 else
