@@ -1,6 +1,6 @@
 # Claude Code state (credentials, history, config) lives here once in use.
-.claude/*
-!.claude/.gitkeep
+dot-claude/*
+!dot-claude/.gitkeep
 
 # Bind-mount targets are created/removed at runtime.
 mounts/*
