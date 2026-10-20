@@ -13,7 +13,7 @@ not the rest of your filesystem.
 
 - The container (`debian:testing`) uses `/workspace` as `$HOME`. On startup it
   installs Claude Code and then runs `claude update` every 30 minutes.
-- `./.claude` on the host is bind-mounted to `~/.claude` in the container, so
+- `./dot-claude` on the host is bind-mounted to `~/.claude` in the container, so
   credentials, settings and history persist across container restarts.
 - `./mounts` on the host is mounted at `/mnt` in the container with mount
   propagation. Mounting a project under `./mounts/<slug>` on the host makes it
@@ -107,7 +107,7 @@ dockerclaude.sh ps
 # /home/me/src/foo -> /mnt/-home-me-src-foo (refcount 2)
 ```
 
-Wipe `./.claude`, keeping only credentials, `.claude.json`, `settings.json`
+Wipe `./dot-claude`, keeping only credentials, `.claude.json`, `settings.json`
 and `skills`. Session history (`history.jsonl`, `projects`, `sessions`,
 `file-history`, `plans`, `session-env`, `shell-snapshots`) is first archived
 to `./session-history/<timestamp>.tar.gz`:
@@ -124,13 +124,13 @@ make stop-container
 
 Note that `make stop-container` removes the container. Anything installed
 with `dockerclaude.sh install` is lost and must be reinstalled after the next
-`make start-container`. Only `./.claude` and your mounted projects persist.
+`make start-container`. Only `./dot-claude` and your mounted projects persist.
 To make a tool available permanently, add it to the `Dockerfile` or add a
 script to `installers/`.
 
 ## How to copy auth from host machine
 
-1. Copy `~/.claude/.credentials.json` to the dockerclaude `.claude` folder.
-2. Copy keys from `~/.claude.json` to dockerclaude `.claude/.claude.json`:
+1. Copy `~/.claude/.credentials.json` to the dockerclaude `dot-claude` folder.
+2. Copy keys from `~/.claude.json` to dockerclaude `dot-claude/.claude.json`:
   - `"hasCompletedOnboarding": true`
   - `"oauthAccount": { ... }`

@@ -13,7 +13,7 @@ services:
     security_opt: [no-new-privileges]
     volumes:
       - type: bind
-        source: ./.claude
+        source: ./dot-claude
         target: /workspace/.claude
       - type: bind
         source: ./mounts

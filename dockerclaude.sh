@@ -135,10 +135,10 @@ function start_session {
         bash -c "umask 002 && cd /mnt/$(slugify "${targetDir}") && claude"
 }
 
-# Wipes ./.claude except for credentials, config and skills, after stashing a
+# Wipes ./dot-claude except for credentials, config and skills, after stashing a
 # compressed copy of the session history in ./session-history.
 function dot_claude_clean {
-    local claudeDir="${DC2DIR}/.claude"
+    local claudeDir="${DC2DIR}/dot-claude"
     local historyDir="${DC2DIR}/session-history"
     local ans f archive
     local -a toArchive=()
