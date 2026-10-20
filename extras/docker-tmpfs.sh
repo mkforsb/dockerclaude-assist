@@ -53,7 +53,9 @@ function volume_dir {
 function container_state_dir {
     local id upper
 
-    read -r id upper < <(docker inspect -f '{{.Id}} {{with .GraphDriver.Data}}{{.UpperDir}}{{end}}' "$1")
+    # With the containerd image store, newer docker versions leave out the
+    # GraphDriver key entirely. `index` tolerates that, `.GraphDriver` doesn't.
+    read -r id upper < <(docker inspect -f '{{.Id}} {{with index . "GraphDriver"}}{{.Data.UpperDir}}{{end}}' "$1")
     [ "${upper}" == "<no value>" ] && upper=""
 
     # The containerd image store doesn't report the upper dir, but the
