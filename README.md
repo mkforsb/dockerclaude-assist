@@ -24,6 +24,11 @@ not the rest of your filesystem.
 - Mounts are reference-counted in `mounts.sqlite3`, so several sessions can
   share a project. The bind mount is removed when the last session for that
   project exits.
+- Each mount is associated with at most one session: `session:<name>` for a
+  session's own project directory, `mount:<name>` for an extra directory
+  mounted into session `<name>`, or no session at all. A directory that is
+  already mounted for one session cannot be mounted for another. When the last
+  `session:<name>` mount goes away, every `mount:<name>` mount goes with it.
 
 ## Requirements
 
@@ -66,10 +71,11 @@ not the rest of your filesystem.
 ## Usage
 
 Start a Claude Code session in a project directory (defaults to the current
-directory):
+directory). The session is named after the directory's absolute path unless a
+name is given:
 
 ```sh
-dockerclaude.sh [DIR]
+dockerclaude.sh [DIR [SESSION]]
 ```
 
 Install extra tooling in the container. If `installers/<NAME>.sh` exists it
@@ -89,22 +95,35 @@ dockerclaude.sh exec bash
 Mount a directory into the container without starting a session, e.g. to give
 an already-running session access to another project. This takes a reference
 on the mount just like a session does, so it stays mounted until it is
-explicitly unmounted (and no session is using it). The container name
-defaults to `dockerclaude`:
+explicitly unmounted (and no session is using it). If a session name is given,
+the directory is instead unmounted automatically once the last instance of
+that session exits:
 
 ```sh
-dockerclaude.sh mount [CONTAINER] DIR
+dockerclaude.sh mount DIR [SESSION]
 # /home/me/src/bar -> dockerclaude:/mnt/-home-me-src-bar (refcount 1)
-dockerclaude.sh umount [CONTAINER] DIR
+dockerclaude.sh umount DIR
 ```
 
-List mounted projects with their reference counts, and report broken mounts
-(e.g. a mount left behind by a crashed session, or a database entry whose
-mount is gone). It also checks that `./mounts` is set up as a shared mount:
+Rename a session, including directories mounted into it. This also works
+while the session is running:
+
+```sh
+dockerclaude.sh rename-session OLD NEW
+```
+
+List sessions with their mounts and reference counts, followed by mounts not
+associated with any session, and report broken mounts (e.g. a mount left
+behind by a crashed session, or a database entry whose mount is gone). It also
+checks that `./mounts` is set up as a shared mount:
 
 ```sh
 dockerclaude.sh ps
-# /home/me/src/foo -> /mnt/-home-me-src-foo (refcount 2)
+# Session foo:
+#   /home/me/src/foo -> /mnt/-home-me-src-foo (refcount 2, session:foo)
+#   /home/me/src/bar -> /mnt/-home-me-src-bar (refcount 1, mount:foo)
+# Unassociated:
+#   /home/me/src/baz -> /mnt/-home-me-src-baz (refcount 1)
 ```
 
 Wipe `./dot-claude`, keeping only credentials, `.claude.json`, `settings.json`

@@ -32,58 +32,52 @@ function perform_install {
     fi
 }
 
+# Runs SQL (the last argument) against the mounts database, passing any other
+# arguments as sqlite3 options. Waits for concurrent sessions to release locks.
+function mounts_db {
+    sqlite3 -cmd '.timeout 10000' "${@:1:$#-1}" "${DC2MOUNTSDB}" "${!#}"
+}
+
+# Prints $1 as an SQL string literal.
+function sql_quote {
+    printf "'%s'" "${1//\'/\'\'}"
+}
+
+# Creates the mounts table, adding the session column to databases created
+# before sessions existed. session is `session:<name>` for a session's own
+# directory, `mount:<name>` for a directory mounted into session <name>, or
+# null for a directory not tied to any session.
 function init_mounts_db {
-    sqlite3 "${DC2MOUNTSDB}" " \
-        create table if not exists mounts (slug text primary key, reference_count int); \
+    mounts_db " \
+        create table if not exists mounts (slug text primary key, reference_count int, session text); \
     "
+
+    if [ "$(mounts_db \
+        "select count(*) from pragma_table_info('mounts') where name = 'session';")" == "0" ]; then
+        # Tolerate a concurrent session having just added it.
+        mounts_db "alter table mounts add column session text;" 2>/dev/null || true
+    fi
 }
 
 # Prints the reference count for slug $1, or nothing if it has no references.
 function mount_refcount {
-    sqlite3 "${DC2MOUNTSDB}" " \
+    mounts_db " \
         select reference_count from mounts \
         where slug = '${1}'; \
     "
 }
 
-# Bind-mounts the absolute host directory $1 under ./mounts (unless it is
-# already mounted) and takes a reference on it.
-function acquire_mount {
-    local slug mountPoint
-    slug=$(slugify "$1")
-    mountPoint="$DC2MOUNTSDIR/${slug}"
-
-    init_mounts_db
-
-    if ! mountpoint -q "${mountPoint}"; then
-        mkdir -p "${mountPoint}"
-        sudo mount --bind "$1" "${mountPoint}"
-    fi
-
-    sqlite3 "${DC2MOUNTSDB}" " \
-        insert into mounts (slug, reference_count)  \
-        values ('${slug}', 1) \
-        on conflict(slug) do update set reference_count = reference_count + 1; \
-    "
+# Prints the host directory bind-mounted at ./mounts/<slug $1>, falling back
+# to the slug itself if it cannot be determined.
+function mount_source {
+    bound_source "${DC2MOUNTSDIR}/${1}" "${1}" || echo "${1}"
 }
 
-# Drops a reference on the absolute host directory $1 and unmounts it once no
-# references remain.
-function release_mount {
-    local slug mountPoint
-    slug=$(slugify "$1")
-    mountPoint="$DC2MOUNTSDIR/${slug}"
+# Unmounts ./mounts/<slug $1> and removes its mount point.
+function unmount_slug {
+    local mountPoint="$DC2MOUNTSDIR/${1}"
 
-    init_mounts_db
-
-    sqlite3 "${DC2MOUNTSDB}" " \
-        update mounts set reference_count = reference_count - 1 \
-        where slug = '${slug}'; \
-        \
-        delete from mounts where reference_count <= 0; \
-    "
-
-    if [ "$(mount_refcount "${slug}")" == "" ] && mountpoint -q "${mountPoint}"; then
+    if mountpoint -q "${mountPoint}"; then
         # Only remove the directory once the unmount has actually succeeded;
         # otherwise the rm would reach through the bind mount into the real
         # project directory.
@@ -96,21 +90,96 @@ function release_mount {
     fi
 }
 
-# Parses `[<container-name>] <path>` for subcommand $1 into the globals
-# container and targetPath.
+# Bind-mounts the absolute host directory $1 under ./mounts (unless it is
+# already mounted) and takes a reference on it on behalf of session $2 (e.g.
+# `session:foo` or `mount:foo`, or empty for none). Fails if the directory is
+# already mounted on behalf of another session.
+function acquire_mount {
+    local slug mountPoint session current
+    slug=$(slugify "$1")
+    mountPoint="$DC2MOUNTSDIR/${slug}"
+    session=NULL
+    [ -n "${2:-}" ] && session=$(sql_quote "$2")
+
+    init_mounts_db
+
+    current=$(mounts_db " \
+        select ifnull('for ' || session, 'without a session') from mounts \
+        where slug = '${slug}' and session is not ${session}; \
+    ")
+    if [ -n "${current}" ]; then
+        echo "dockerclaude: $1 is already mounted ${current}" >&2
+        return 1
+    fi
+
+    if ! mountpoint -q "${mountPoint}"; then
+        mkdir -p "${mountPoint}"
+        sudo mount --bind "$1" "${mountPoint}"
+    fi
+
+    mounts_db " \
+        insert into mounts (slug, reference_count, session)  \
+        values ('${slug}', 1, ${session}) \
+        on conflict(slug) do update set reference_count = reference_count + 1; \
+    "
+}
+
+# Drops a reference on the absolute host directory $1 and unmounts it once no
+# references remain. If that was the last mount of session `session:<name>`,
+# every directory mounted with `mount:<name>` is unmounted as well.
+function release_mount {
+    local slug session name mountSession s rc=0
+    local -a sessionMounts=()
+    slug=$(slugify "$1")
+
+    init_mounts_db
+
+    session=$(mounts_db "select session from mounts where slug = '${slug}';")
+
+    mounts_db " \
+        update mounts set reference_count = reference_count - 1 \
+        where slug = '${slug}'; \
+        \
+        delete from mounts where reference_count <= 0; \
+    "
+
+    if [ "$(mount_refcount "${slug}")" == "" ]; then
+        unmount_slug "${slug}" || rc=1
+    fi
+
+    if [[ "${session}" == session:* ]]; then
+        name="${session#session:}"
+        mountSession=$(sql_quote "mount:${name}")
+
+        mapfile -t sessionMounts < <(mounts_db " \
+            begin immediate; \
+            select slug from mounts where session = ${mountSession} \
+                and not exists (select 1 from mounts where session = $(sql_quote "${session}")); \
+            delete from mounts where session = ${mountSession} \
+                and not exists (select 1 from mounts where session = $(sql_quote "${session}")); \
+            commit; \
+        ")
+
+        for s in "${sessionMounts[@]}"; do
+            echo "Session ${name} ended, unmounting $(mount_source "${s}") from /mnt/${s}"
+            unmount_slug "${s}" || rc=1
+        done
+    fi
+
+    return "${rc}"
+}
+
+# Parses `<path> [<session-name>]` for subcommand $1 into the globals
+# targetPath and sessionName (empty if not given).
 function parse_mount_args {
     local cmd="$1"
     shift
 
     case $# in
-        1) container=dockerclaude; targetPath="$1" ;;
-        2) container="$1"; targetPath="$2" ;;
+        1) targetPath="$1"; sessionName="" ;;
+        2) targetPath="$1"; sessionName="$2" ;;
         *)
-            if [ ! "$cmd" == "" ]; then
-                echo "usage: dockerclaude.sh ${cmd} [<container-name>] <path>" >&2
-            else
-                echo "usage: dockerclaude.sh [<container-name>] <path>" >&2
-            fi
+            echo "usage: dockerclaude.sh ${cmd} <path> [<session-name>]" >&2
             exit 1
             ;;
     esac
@@ -121,11 +190,13 @@ function parse_mount_args {
     fi
 }
 
+# Starts a session in directory $1 (default: the current directory), named $2
+# (default: the directory's absolute path).
 function start_session {
     local targetDir
     targetDir=$(realpath "${1:-.}")
 
-    acquire_mount "${targetDir}"
+    acquire_mount "${targetDir}" "session:${2:-${targetDir}}"
 
     # From here on, always release the mount/refcount on exit, including when
     # the session is interrupted or the exec fails.
@@ -133,6 +204,29 @@ function start_session {
 
     docker compose -f "${DC2DIR}/docker-compose.yml" exec -it dockerclaude \
         bash -c "umask 002 && cd /mnt/$(slugify "${targetDir}") && claude"
+}
+
+# Renames session $1 to $2, i.e. moves all mounts of `session:$1` and
+# `mount:$1` to `session:$2` and `mount:$2`.
+function rename_session {
+    local renamed
+
+    init_mounts_db
+
+    renamed=$(mounts_db " \
+        update mounts set session = $(sql_quote "session:${2}") \
+        where session = $(sql_quote "session:${1}"); \
+        update mounts set session = $(sql_quote "mount:${2}") \
+        where session = $(sql_quote "mount:${1}"); \
+        select total_changes(); \
+    ")
+
+    if [ "${renamed}" == "0" ]; then
+        echo "No session named ${1}" >&2
+        return 1
+    fi
+
+    echo "Renamed session ${1} to ${2} (${renamed} mount(s))"
 }
 
 # Wipes ./dot-claude except for credentials, config and skills, after stashing a
@@ -194,14 +288,17 @@ elif [ "${1:-}" == "mount" ]; then
 
     targetDir=$(realpath "${targetPath}")
     slug=$(slugify "${targetDir}")
-    acquire_mount "${targetDir}"
-    echo "${targetDir} -> ${container}:/mnt/${slug} (refcount $(mount_refcount "${slug}"))"
+    acquire_mount "${targetDir}" "${sessionName:+mount:${sessionName}}"
+    echo "${targetDir} -> dockerclaude:/mnt/${slug} (refcount $(mount_refcount "${slug}"))"
 elif [ "${1:-}" == "umount" ]; then
     shift
-    parse_mount_args umount "$@"
+    if [ $# -ne 1 ]; then
+        echo "usage: dockerclaude.sh umount <path>" >&2
+        exit 1
+    fi
 
     # -m: allow unmounting even if the source directory has since been removed
-    targetDir=$(realpath -m "${targetPath}")
+    targetDir=$(realpath -m "$1")
     slug=$(slugify "${targetDir}")
     init_mounts_db
 
@@ -216,8 +313,16 @@ elif [ "${1:-}" == "umount" ]; then
     if [ -n "${refCount}" ]; then
         echo "${targetDir} is still in use (refcount ${refCount})"
     else
-        echo "Unmounted ${targetDir} from ${container}:/mnt/${slug}"
+        echo "Unmounted ${targetDir} from dockerclaude:/mnt/${slug}"
     fi
+elif [ "${1:-}" == "rename-session" ]; then
+    shift
+    if [ $# -ne 2 ] || [ -z "$1" ] || [ -z "$2" ]; then
+        echo "usage: dockerclaude.sh rename-session <old-name> <new-name>" >&2
+        exit 1
+    fi
+
+    rename_session "$1" "$2"
 elif [ "${1:-}" == "ps" ]; then
     docker ps -as -f name=dockerclaude
 
@@ -237,10 +342,21 @@ elif [ "${1:-}" == "ps" ]; then
         find "${DC2MOUNTSDIR}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
     )
 
+    # Bring databases from before sessions existed up to date, without creating
+    # one if it is missing.
+    [ -f "${DC2MOUNTSDB}" ] && init_mounts_db
+
+    # One row per mount: session name, `session`/`mount` (both empty if not
+    # associated with a session), slug and refcount. Grouped by session with
+    # the session's own mounts first and unassociated mounts last.
     # A missing or unreadable database is treated as empty.
     mapfile -t mountsRefCount < <(
-        sqlite3 -readonly "${DC2MOUNTSDB}" \
-            "select slug, reference_count from mounts order by slug;" 2>/dev/null
+        mounts_db -readonly -separator $'\x1f' " \
+            select ifnull(substr(session, instr(session, ':') + 1), ''), \
+                   ifnull(substr(session, 1, instr(session, ':') - 1), ''), \
+                   slug, reference_count \
+            from mounts \
+            order by session is null, 1, 2 desc, 3;" 2>/dev/null
     )
 
     if [ "${#mountsOnDisk[@]}" -eq 0 ] && [ "${#mountsRefCount[@]}" -eq 0 ]; then
@@ -253,17 +369,29 @@ elif [ "${1:-}" == "ps" ]; then
         onDisk["${slug}"]=1
     done
 
+    group=$'\n'
     for row in "${mountsRefCount[@]}"; do
-        IFS='|' read -r slug refcount <<< "${row}"
+        IFS=$'\x1f' read -r name kind slug refcount <<< "${row}"
         inDb["${slug}"]=1
 
+        if [ "${kind:+session:}${name}" != "${group}" ]; then
+            group="${kind:+session:}${name}"
+            if [ -z "${kind}" ]; then
+                echo "Unassociated:"
+            elif [ "${kind}" == "mount" ]; then
+                # Sessions sort before mounts, so there is no session:<name>.
+                echo "Session ${name} (not running):"
+            else
+                echo "Session ${name}:"
+            fi
+        fi
+
         if [ -z "${onDisk[${slug}]:-}" ]; then
-            echo "Broken mount! ${slug} with refcount ${refcount} is not present in filesystem!"
+            echo "  Broken mount! ${slug} with refcount ${refcount} is not present in filesystem!"
         elif ! mountpoint -q "${DC2MOUNTSDIR}/${slug}"; then
-            echo "Broken mount! ${slug} with refcount ${refcount} exists but is not mounted!"
+            echo "  Broken mount! ${slug} with refcount ${refcount} exists but is not mounted!"
         else
-            srcDir=$(bound_source "${DC2MOUNTSDIR}/${slug}" "${slug}") || srcDir="${slug}"
-            echo "${srcDir} -> /mnt/${slug} (refcount ${refcount})"
+            echo "  $(mount_source "${slug}") -> /mnt/${slug} (refcount ${refcount}${kind:+, ${kind}:${name}})"
         fi
     done
 
@@ -272,9 +400,10 @@ elif [ "${1:-}" == "ps" ]; then
             echo "Broken mount! ${slug} not present in refcount database!"
         fi
     done
-elif [ -d "$@" ]; then
-    parse_mount_args "" "$@"
-    start_session "${targetPath}"
+elif [ $# -le 2 ] && [ -d "${1:-.}" ]; then
+    start_session "${1:-.}" "${2:-}"
 else
-    echo "Invalid path or command \`$@\`"
+    echo "Invalid path or command \`$*\`" >&2
+    echo "usage: dockerclaude.sh [<path> [<session-name>]]" >&2
+    exit 1
 fi
