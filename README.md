@@ -154,6 +154,43 @@ with `dockerclaude.sh install` is lost and must be reinstalled after the next
 To make a tool available permanently, add it to the `Dockerfile` or add a
 script to `installers/`.
 
+## Running several instances
+
+Set `DCPREFIX` to run a separate container alongside the default one, with its
+own state. Everything instance-specific gets the prefix: the container and
+Compose project (`<prefix>dockerclaude`), and `./<prefix>dot-claude`,
+`./<prefix>mounts`, `<prefix>mounts.sqlite3` and `./<prefix>session-history`
+on the host. End the prefix with a separator and keep it lowercase, since it
+is also part of the Compose project name:
+
+```sh
+export DCPREFIX=work-
+make setup-mounts       # also creates ./work-mounts and ./work-dot-claude
+make start-container
+dockerclaude.sh         # session in work-dockerclaude
+```
+
+Every `dockerclaude.sh` and `make` command acts on the instance selected by
+`DCPREFIX`, so it has to be set for all of them, not just for setup. Each
+instance needs its own login (see
+[copying auth](#how-to-copy-auth-from-host-machine), using
+`./<prefix>dot-claude`).
+
+Show the prefix in use. `prefix` prints the bare prefix, or nothing if none is
+set, e.g. for a shell prompt:
+
+```sh
+dockerclaude.sh prefix
+dockerclaude.sh 'prefix?'   # Prefix: work-  /  No prefix
+```
+
+Instances share the `dockerclaude:latest` image by default. To give one its
+own image, e.g. to try out `Dockerfile` changes, also set `DCIMAGEPREFIX`:
+
+```sh
+DCIMAGEPREFIX=test- make build   # builds test-dockerclaude:latest
+```
+
 ## How to copy auth from host machine
 
 1. Copy `~/.claude/.credentials.json` to the dockerclaude `dot-claude` folder.

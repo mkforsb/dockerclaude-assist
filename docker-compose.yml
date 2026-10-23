@@ -1,3 +1,4 @@
+name: ${DCPREFIX:-}dockerclaude
 services:
   dockerclaude:
     environment:
@@ -6,17 +7,17 @@ services:
       - TERM_PROGRAM_VERSION
       - TMUX
       - TZ=Europe/Stockholm
-    image: dockerclaude:latest
-    container_name: dockerclaude
+    image: ${DCIMAGEPREFIX:-}dockerclaude:latest
+    container_name: ${DCPREFIX:-}dockerclaude
     read_only: false
     restart: unless-stopped
     security_opt: [no-new-privileges]
     volumes:
       - type: bind
-        source: ./dot-claude
+        source: ./${DCPREFIX:-}dot-claude
         target: /workspace/.claude
       - type: bind
-        source: ./mounts
+        source: ./${DCPREFIX:-}mounts
         target: /mnt
         bind:
           propagation: rslave

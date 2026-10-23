@@ -1,10 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
-DC2SELF="$(realpath "$0")"
-DC2DIR="$(dirname "${DC2SELF}")"
-DC2MOUNTSDIR="$DC2DIR/mounts"
-DC2MOUNTSDB="$DC2DIR/mounts.sqlite3"
+export DCPREFIX="${DCPREFIX:-}"
+
+DCSELF="$(realpath "$0")"
+DCDIR="$(dirname "${DCSELF}")"
+DCMOUNTSDIR="$DCDIR/${DCPREFIX}mounts"
+DCMOUNTSDB="$DCDIR/${DCPREFIX}mounts.sqlite3"
 
 function slugify {
     echo "$1" | sed -E 's/[^A-Za-z0-9]/-/g'
@@ -24,11 +26,11 @@ function bound_source {
 }
 
 function perform_install {
-    if [ -f "$DC2DIR/installers/${1}.sh" ]; then
-        docker compose -f "${DC2DIR}/docker-compose.yml" exec -it dockerclaude \
+    if [ -f "$DCDIR/installers/${1}.sh" ]; then
+        docker compose -f "${DCDIR}/docker-compose.yml" exec -it dockerclaude \
             bash -c "umask 002 && /installers/${1}.sh"
     else
-        docker compose -f "${DC2DIR}/docker-compose.yml" exec -it dockerclaude \
+        docker compose -f "${DCDIR}/docker-compose.yml" exec -it dockerclaude \
             bash -c "umask 002 && apt update && apt install -y $*"
     fi
 }
@@ -36,7 +38,7 @@ function perform_install {
 # Runs SQL (the last argument) against the mounts database, passing any other
 # arguments as sqlite3 options. Waits for concurrent sessions to release locks.
 function mounts_db {
-    sqlite3 -cmd '.timeout 10000' "${@:1:$#-1}" "${DC2MOUNTSDB}" "${!#}"
+    sqlite3 -cmd '.timeout 10000' "${@:1:$#-1}" "${DCMOUNTSDB}" "${!#}"
 }
 
 # Prints $1 as an SQL string literal.
@@ -71,12 +73,12 @@ function mount_refcount {
 # Prints the host directory bind-mounted at ./mounts/<slug $1>, falling back
 # to the slug itself if it cannot be determined.
 function mount_source {
-    bound_source "${DC2MOUNTSDIR}/${1}" "${1}" || echo "${1}"
+    bound_source "${DCMOUNTSDIR}/${1}" "${1}" || echo "${1}"
 }
 
 # Unmounts ./mounts/<slug $1> and removes its mount point.
 function unmount_slug {
-    local mountPoint="$DC2MOUNTSDIR/${1}"
+    local mountPoint="$DCMOUNTSDIR/${1}"
 
     if mountpoint -q "${mountPoint}"; then
         # Only remove the directory once the unmount has actually succeeded;
@@ -85,7 +87,7 @@ function unmount_slug {
         if sudo umount "${mountPoint}"; then
             rmdir "${mountPoint}"
         else
-            echo "dockerclaude: failed to unmount ${mountPoint}, leaving it in place" >&2
+            echo "${DCPREFIX}dockerclaude: failed to unmount ${mountPoint}, leaving it in place" >&2
             return 1
         fi
     fi
@@ -98,7 +100,7 @@ function unmount_slug {
 function acquire_mount {
     local slug mountPoint session current
     slug=$(slugify "$1")
-    mountPoint="$DC2MOUNTSDIR/${slug}"
+    mountPoint="$DCMOUNTSDIR/${slug}"
     session=NULL
     [ -n "${2:-}" ] && session=$(sql_quote "$2")
 
@@ -109,7 +111,7 @@ function acquire_mount {
         where slug = '${slug}' and session is not ${session}; \
     ")
     if [ -n "${current}" ]; then
-        echo "dockerclaude: $1 is already mounted ${current}" >&2
+        echo "${DCPREFIX}dockerclaude: $1 is already mounted ${current}" >&2
         return 1
     fi
 
@@ -203,7 +205,7 @@ function start_session {
     # the session is interrupted or the exec fails.
     trap "release_mount $(printf '%q' "${targetDir}")" EXIT
 
-    docker compose -f "${DC2DIR}/docker-compose.yml" exec -it dockerclaude \
+    docker compose -f "${DCDIR}/docker-compose.yml" exec -it dockerclaude \
         bash -c "umask 002 && cd /mnt/$(slugify "${targetDir}") && claude"
 }
 
@@ -233,8 +235,8 @@ function rename_session {
 # Wipes ./dot-claude except for credentials, config and skills, after stashing a
 # compressed copy of the session history in ./session-history.
 function dot_claude_clean {
-    local claudeDir="${DC2DIR}/dot-claude"
-    local historyDir="${DC2DIR}/session-history"
+    local claudeDir="${DCDIR}/${DCPREFIX}dot-claude"
+    local historyDir="${DCDIR}/${DCPREFIX}session-history"
     local ans f archive
     local -a toArchive=()
 
@@ -248,7 +250,7 @@ function dot_claude_clean {
 
     for f in file-history history.jsonl plans projects session-env sessions shell-snapshots; do
         if [ -e "${claudeDir}/${f}" ]; then
-            toArchive+=("dot-claude/${f}")
+            toArchive+=("${DCPREFIX}dot-claude/${f}")
         fi
     done
 
@@ -256,7 +258,7 @@ function dot_claude_clean {
     if [ "${#toArchive[@]}" -gt 0 ]; then
         mkdir -p "${historyDir}"
         archive="${historyDir}/$(date +%Y%m%d-%H%M%S).tar.gz"
-        tar -C "${DC2DIR}" -czf "${archive}" "${toArchive[@]}"
+        tar -C "${DCDIR}" -czf "${archive}" "${toArchive[@]}"
         echo "Saved session history to ${archive}"
     fi
 
@@ -281,10 +283,10 @@ function list_sessions {
 function list_mounted_dirs {
     local slug
 
-    find "${DC2MOUNTSDIR}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort \
+    find "${DCMOUNTSDIR}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort \
         | while read -r slug; do
-            if mountpoint -q "${DC2MOUNTSDIR}/${slug}"; then
-                bound_source "${DC2MOUNTSDIR}/${slug}" "${slug}" || true
+            if mountpoint -q "${DCMOUNTSDIR}/${slug}"; then
+                bound_source "${DCMOUNTSDIR}/${slug}" "${slug}" || true
             fi
         done
 }
@@ -292,8 +294,8 @@ function list_mounted_dirs {
 # Prints shell code that defines a `dockerclaude` function running this script
 # by its full path, and bash completion for it and dockerclaude.sh.
 function print_init {
-    printf '_dockerclaude_self=%q\n' "${DC2SELF}"
-    printf '_dockerclaude_dir=%q\n' "${DC2DIR}"
+    printf '_dockerclaude_self=%q\n' "${DCSELF}"
+    printf '_dockerclaude_dir=%q\n' "${DCDIR}"
     cat <<'EOF'
 dockerclaude() {
     "${_dockerclaude_self}" "$@"
@@ -306,7 +308,7 @@ _dockerclaude() {
 
     case "${COMP_CWORD}" in
         1)
-            words=(install exec make dir dot-claude-clean mount umount rename-session ps init)
+            words=(install exec make dir dot-claude-clean mount umount rename-session ps init prefix prefix?)
             compopt -o filenames
             mapfile -t COMPREPLY < <(compgen -d -- "${cur}")
             ;;
@@ -331,7 +333,7 @@ _dockerclaude() {
                 rename-session)
                     mapfile -t words < <("${_dockerclaude_self}" __list sessions 2>/dev/null)
                     ;;
-                exec|dir|dot-claude-clean|ps|init)
+                exec|dir|dot-claude-clean|ps|init|prefix|prefix\?)
                     ;;
                 *)
                     # dockerclaude.sh <path> <session-name>
@@ -362,15 +364,27 @@ EOF
 if [ "${1:-}" == "install" ]; then
     shift
     perform_install "$@"
+elif [ "${1:-}" == "prefix" ]; then
+    shift
+    if [ ! "${DCPREFIX}" == "" ]; then
+        echo ${DCPREFIX}
+    fi
+elif [ "${1:-}" == "prefix?" ]; then
+    shift
+    if [ "${DCPREFIX}" == "" ]; then
+        echo No prefix
+    else
+        echo Prefix: ${DCPREFIX}
+    fi
 elif [ "${1:-}" == "exec" ]; then
     shift
-    docker compose -f "${DC2DIR}/docker-compose.yml" exec -it dockerclaude bash -c 'umask 002 && exec "$@"' bash "$@"
+    docker compose -f "${DCDIR}/docker-compose.yml" exec -it dockerclaude bash -c 'umask 002 && exec "$@"' bash "$@"
 elif [ "${1:-}" == "make" ]; then
     shift
-    cd "${DC2DIR}" && make "$@"
+    cd "${DCDIR}" && make "$@"
 elif [ "${1:-}" == "dir" ]; then
     shift
-    echo "${DC2DIR}"
+    echo "${DCDIR}"
 elif [ "${1:-}" == "dot-claude-clean" ]; then
     dot_claude_clean
 elif [ "${1:-}" == "mount" ]; then
@@ -380,7 +394,7 @@ elif [ "${1:-}" == "mount" ]; then
     targetDir=$(realpath "${targetPath}")
     slug=$(slugify "${targetDir}")
     acquire_mount "${targetDir}" "${sessionName:+mount:${sessionName}}"
-    echo "${targetDir} -> dockerclaude:/mnt/${slug} (refcount $(mount_refcount "${slug}"))"
+    echo "${targetDir} -> ${DCPREFIX}dockerclaude:/mnt/${slug} (refcount $(mount_refcount "${slug}"))"
 elif [ "${1:-}" == "umount" ]; then
     shift
     if [ $# -ne 1 ]; then
@@ -393,7 +407,7 @@ elif [ "${1:-}" == "umount" ]; then
     slug=$(slugify "${targetDir}")
     init_mounts_db
 
-    if [ -z "$(mount_refcount "${slug}")" ] && ! mountpoint -q "${DC2MOUNTSDIR}/${slug}"; then
+    if [ -z "$(mount_refcount "${slug}")" ] && ! mountpoint -q "${DCMOUNTSDIR}/${slug}"; then
         echo "${targetDir} is not mounted" >&2
         exit 1
     fi
@@ -404,7 +418,7 @@ elif [ "${1:-}" == "umount" ]; then
     if [ -n "${refCount}" ]; then
         echo "${targetDir} is still in use (refcount ${refCount})"
     else
-        echo "Unmounted ${targetDir} from dockerclaude:/mnt/${slug}"
+        echo "Unmounted ${targetDir} from ${DCPREFIX}dockerclaude:/mnt/${slug}"
     fi
 elif [ "${1:-}" == "rename-session" ]; then
     shift
@@ -415,27 +429,32 @@ elif [ "${1:-}" == "rename-session" ]; then
 
     rename_session "$1" "$2"
 elif [ "${1:-}" == "ps" ]; then
-    docker ps -as -f name=dockerclaude
+    if [ ! "${DCPREFIX}" == "" ]; then
+        echo Prefix: ${DCPREFIX}
+        echo
+    fi
 
-    (IFS=$'\n' && for s in $(docker logs dockerclaude | tail -n2); do echo "> $s"; done)
+    docker ps -as -f "name=^${DCPREFIX}dockerclaude$"
+
+    (IFS=$'\n' && for s in $(docker logs ${DCPREFIX}dockerclaude | tail -n2); do echo "> $s"; done)
 
     echo
     echo "Sessions/mounts:"
     # ./mounts must be a shared mount point (see `make setup-mounts`), otherwise
     # project mounts will not propagate into the running container.
-    if ! mountpoint -q "${DC2MOUNTSDIR}" || \
-        [[ "$(findmnt -n -o PROPAGATION --mountpoint "${DC2MOUNTSDIR}")" != *shared* ]]; then
-        echo "${DC2MOUNTSDIR} is not mounted properly! (run 'make setup-mounts')" >&2
+    if ! mountpoint -q "${DCMOUNTSDIR}" || \
+        [[ "$(findmnt -n -o PROPAGATION --mountpoint "${DCMOUNTSDIR}")" != *shared* ]]; then
+        echo "${DCMOUNTSDIR} is not mounted properly! (run 'make setup-mounts')" >&2
         exit 1
     fi
 
     mapfile -t mountsOnDisk < <(
-        find "${DC2MOUNTSDIR}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
+        find "${DCMOUNTSDIR}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
     )
 
     # Bring databases from before sessions existed up to date, without creating
     # one if it is missing.
-    [ -f "${DC2MOUNTSDB}" ] && init_mounts_db
+    [ -f "${DCMOUNTSDB}" ] && init_mounts_db
 
     # One row per mount: session name, `session`/`mount` (both empty if not
     # associated with a session), slug and refcount. Grouped by session with
@@ -479,7 +498,7 @@ elif [ "${1:-}" == "ps" ]; then
 
         if [ -z "${onDisk[${slug}]:-}" ]; then
             echo "  Broken mount! ${slug} with refcount ${refcount} is not present in filesystem!"
-        elif ! mountpoint -q "${DC2MOUNTSDIR}/${slug}"; then
+        elif ! mountpoint -q "${DCMOUNTSDIR}/${slug}"; then
             echo "  Broken mount! ${slug} with refcount ${refcount} exists but is not mounted!"
         else
             echo "  $(mount_source "${slug}") -> /mnt/${slug} (refcount ${refcount}${kind:+, ${kind}:${name}})"
