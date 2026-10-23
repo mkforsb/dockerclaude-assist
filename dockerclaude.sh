@@ -7,6 +7,8 @@ DCSELF="$(realpath "$0")"
 DCDIR="$(dirname "${DCSELF}")"
 DCMOUNTSDIR="$DCDIR/${DCPREFIX}mounts"
 DCMOUNTSDB="$DCDIR/${DCPREFIX}mounts.sqlite3"
+DCSNAPSHOTTAG="${DCPREFIX}snapshot"
+DCSNAPSHOTFILE="$DCDIR/${DCPREFIX}snapshot.tar.zst"
 
 function slugify {
     echo "$1" | sed -E 's/[^A-Za-z0-9]/-/g'
@@ -291,6 +293,69 @@ function list_mounted_dirs {
         done
 }
 
+# Fails unless ./mounts is a shared mount point (see `make setup-mounts`),
+# without which project mounts do not propagate into the running container.
+function check_mounts_dir {
+    if ! mountpoint -q "${DCMOUNTSDIR}" || \
+        [[ "$(findmnt -n -o PROPAGATION --mountpoint "${DCMOUNTSDIR}")" != *shared* ]]; then
+        echo "${DCMOUNTSDIR} is not mounted properly! (run 'make setup-mounts')" >&2
+        return 1
+    fi
+}
+
+# Prints the image tag to start the container from: $DCIMAGETAG if set, else
+# the tag of the existing container (so it is never recreated from another
+# image by accident), else the snapshot if it is loaded, else latest.
+function image_tag {
+    local image
+
+    if [ -n "${DCIMAGETAG:-}" ]; then
+        echo "${DCIMAGETAG}"
+    elif image=$(docker container inspect -f '{{.Config.Image}}' "${DCPREFIX}dockerclaude" 2>/dev/null); then
+        echo "${image##*:}"
+    elif docker image inspect "${DCIMAGEPREFIX:-}dockerclaude:${DCSNAPSHOTTAG}" >/dev/null 2>&1; then
+        echo "${DCSNAPSHOTTAG}"
+    else
+        echo latest
+    fi
+}
+
+# Commits the container to the snapshot image and saves that to ./snapshot.tar.zst,
+# replacing the previous snapshot only once the new one is complete.
+function save_snapshot {
+    local image="${DCIMAGEPREFIX:-}dockerclaude:${DCSNAPSHOTTAG}"
+
+    docker commit "${DCPREFIX}dockerclaude" "${image}" >/dev/null
+
+    if ! docker save "${image}" | zstd -T0 -q -f -o "${DCSNAPSHOTFILE}.tmp"; then
+        rm -f "${DCSNAPSHOTFILE}.tmp"
+        echo "${DCPREFIX}dockerclaude: failed to save ${image}" >&2
+        return 1
+    fi
+
+    mv "${DCSNAPSHOTFILE}.tmp" "${DCSNAPSHOTFILE}"
+    echo "Saved ${DCPREFIX}dockerclaude to ${DCSNAPSHOTFILE} ($(du -h "${DCSNAPSHOTFILE}" | cut -f1))"
+}
+
+# Loads the snapshot image from ./snapshot.tar.zst and starts the container
+# from it, e.g. after a Docker wipe.
+function restore_snapshot {
+    if [ ! -f "${DCSNAPSHOTFILE}" ]; then
+        echo "${DCPREFIX}dockerclaude: no snapshot at ${DCSNAPSHOTFILE}" >&2
+        return 1
+    fi
+
+    if docker container inspect "${DCPREFIX}dockerclaude" >/dev/null 2>&1; then
+        echo "${DCPREFIX}dockerclaude: container already exists, run 'make stop-container' first" >&2
+        return 1
+    fi
+
+    check_mounts_dir
+
+    zstd -dc "${DCSNAPSHOTFILE}" | docker load
+    cd "${DCDIR}" && DCIMAGETAG="${DCSNAPSHOTTAG}" make start-container
+}
+
 # Prints shell code that defines a `dockerclaude` function running this script
 # by its full path, and bash completion for it and dockerclaude.sh.
 function print_init {
@@ -308,7 +373,7 @@ _dockerclaude() {
 
     case "${COMP_CWORD}" in
         1)
-            words=(install exec make dir dot-claude-clean mount umount rename-session ps init prefix prefix?)
+            words=(install exec make dir dot-claude-clean snapshot restore mount umount rename-session ps init prefix prefix?)
             compopt -o filenames
             mapfile -t COMPREPLY < <(compgen -d -- "${cur}")
             ;;
@@ -333,7 +398,7 @@ _dockerclaude() {
                 rename-session)
                     mapfile -t words < <("${_dockerclaude_self}" __list sessions 2>/dev/null)
                     ;;
-                exec|dir|dot-claude-clean|ps|init|prefix|prefix\?)
+                exec|dir|dot-claude-clean|snapshot|restore|ps|init|prefix|prefix\?)
                     ;;
                 *)
                     # dockerclaude.sh <path> <session-name>
@@ -387,6 +452,10 @@ elif [ "${1:-}" == "dir" ]; then
     echo "${DCDIR}"
 elif [ "${1:-}" == "dot-claude-clean" ]; then
     dot_claude_clean
+elif [ "${1:-}" == "snapshot" ]; then
+    save_snapshot
+elif [ "${1:-}" == "restore" ]; then
+    restore_snapshot
 elif [ "${1:-}" == "mount" ]; then
     shift
     parse_mount_args mount "$@"
@@ -440,13 +509,7 @@ elif [ "${1:-}" == "ps" ]; then
 
     echo
     echo "Sessions/mounts:"
-    # ./mounts must be a shared mount point (see `make setup-mounts`), otherwise
-    # project mounts will not propagate into the running container.
-    if ! mountpoint -q "${DCMOUNTSDIR}" || \
-        [[ "$(findmnt -n -o PROPAGATION --mountpoint "${DCMOUNTSDIR}")" != *shared* ]]; then
-        echo "${DCMOUNTSDIR} is not mounted properly! (run 'make setup-mounts')" >&2
-        exit 1
-    fi
+    check_mounts_dir
 
     mapfile -t mountsOnDisk < <(
         find "${DCMOUNTSDIR}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
@@ -518,6 +581,9 @@ elif [ "${1:-}" == "__list" ]; then
         sessions) list_sessions ;;
         mounts) list_mounted_dirs ;;
     esac
+elif [ "${1:-}" == "__image-tag" ]; then
+    # Used by `make start-container`.
+    image_tag
 elif [ $# -le 2 ] && [ -d "${1:-.}" ]; then
     start_session "${1:-.}" "${2:-}"
 else

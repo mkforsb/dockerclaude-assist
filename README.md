@@ -37,6 +37,7 @@ not the rest of your filesystem.
 - `sudo` (for `mount`/`umount`)
 - `sqlite3`
 - `mountpoint` (from `util-linux`)
+- `zstd` (for snapshots)
 
 ## Setup
 
@@ -190,6 +191,39 @@ own image, e.g. to try out `Dockerfile` changes, also set `DCIMAGEPREFIX`:
 ```sh
 DCIMAGEPREFIX=test- make build   # builds test-dockerclaude:latest
 ```
+
+## Snapshots
+
+Everything in `./<prefix>dot-claude` and the mounts database lives on the host,
+but whatever was installed in the container (`dockerclaude.sh install`,
+toolchains under `/workspace`, etc.) is lost with it. To get an instance back
+quickly after a Docker wipe, snapshot it first:
+
+```sh
+dockerclaude.sh snapshot   # commits the container, saves ./<prefix>snapshot.tar.zst
+# ... wipe Docker ...
+dockerclaude.sh restore    # loads the snapshot and starts the container from it
+```
+
+`snapshot` commits the container to the image `dockerclaude:<prefix>snapshot`
+and saves that, including the base image, to a zstd-compressed file. It can be
+taken while the container is running (it is paused briefly), but is best taken
+between sessions. Restoring needs no network or `make build`. Use the same
+`DCIMAGEPREFIX` as when the snapshot was taken.
+
+`make start-container` keeps an existing container on the image it was created
+from, and otherwise starts from the snapshot if one is loaded. Set
+`DCIMAGETAG` to choose the tag explicitly, e.g. to go back to a fresh
+`latest`:
+
+```sh
+make stop-container
+DCIMAGETAG=latest make start-container
+```
+
+Snapshots taken from a restored container grow a layer each time, and changes
+to the `Dockerfile` never reach them. Every so often, rebuild with `make build`,
+start from `latest`, reinstall your tools and take a new snapshot.
 
 ## How to copy auth from host machine
 

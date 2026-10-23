@@ -16,7 +16,7 @@ setup-mounts:
 	sudo mount --make-rshared ./${DCPREFIX}mounts
 
 start-container:
-	docker compose -f ./docker-compose.yml up -d
+	DCIMAGETAG="$$(./dockerclaude.sh __image-tag)" docker compose -f ./docker-compose.yml up -d
 
 stop-container:
 	docker compose -f ./docker-compose.yml down
