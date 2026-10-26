@@ -30,10 +30,10 @@ function bound_source {
 function perform_install {
     if [ -f "$DCDIR/installers/${1}.sh" ]; then
         docker compose -f "${DCDIR}/docker-compose.yml" exec -it dockerclaude \
-            bash -c "umask 002 && /installers/${1}.sh"
+            bash -lc "umask 002 && /installers/${1}.sh"
     else
         docker compose -f "${DCDIR}/docker-compose.yml" exec -it dockerclaude \
-            bash -c "umask 002 && apt update && apt install -y $*"
+            bash -lc "umask 002 && apt update && apt install -y $*"
     fi
 }
 
@@ -208,7 +208,7 @@ function start_session {
     trap "release_mount $(printf '%q' "${targetDir}")" EXIT
 
     docker compose -f "${DCDIR}/docker-compose.yml" exec -it dockerclaude \
-        bash -c "umask 002 && cd /mnt/$(slugify "${targetDir}") && claude"
+        bash -lc "umask 002 && cd /mnt/$(slugify "${targetDir}") && claude"
 }
 
 # Renames session $1 to $2, i.e. moves all mounts of `session:$1` and
@@ -443,7 +443,7 @@ elif [ "${1:-}" == "prefix?" ]; then
     fi
 elif [ "${1:-}" == "exec" ]; then
     shift
-    docker compose -f "${DCDIR}/docker-compose.yml" exec -it dockerclaude bash -c 'umask 002 && exec "$@"' bash "$@"
+    docker compose -f "${DCDIR}/docker-compose.yml" exec -it dockerclaude bash -lc 'umask 002 && exec "$@"' bash "$@"
 elif [ "${1:-}" == "make" ]; then
     shift
     cd "${DCDIR}" && make "$@"

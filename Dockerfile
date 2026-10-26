@@ -18,11 +18,12 @@ COPY entrypoint.sh /entrypoint.sh
 
 RUN chmod 0755 /entrypoint.sh
 
-RUN mkdir /workspace
+RUN mkdir /workspace && echo 'PATH=/workspace/.local/bin:$PATH' >> /workspace/.bashrc
 
 WORKDIR /workspace
 
 ENV HOME=/workspace \
-    PATH=/workspace/.local/bin:/usr/local/bin:/usr/bin:/bin
+    SHELL=/bin/bash \
+    BASH_ENV=/workspace/.bashrc
 
 ENTRYPOINT ["/entrypoint.sh"]
