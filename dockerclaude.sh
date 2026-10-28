@@ -373,7 +373,7 @@ _dockerclaude() {
 
     case "${COMP_CWORD}" in
         1)
-            words=(install exec make dir dot-claude-clean snapshot restore mount umount rename-session ps init prefix prefix?)
+            words=(install exec make dir dot-claude-clean snapshot restore mount umount rename-session ps init prefix prefix? prefixes)
             compopt -o filenames
             mapfile -t COMPREPLY < <(compgen -d -- "${cur}")
             ;;
@@ -398,7 +398,10 @@ _dockerclaude() {
                 rename-session)
                     mapfile -t words < <("${_dockerclaude_self}" __list sessions 2>/dev/null)
                     ;;
-                exec|dir|dot-claude-clean|snapshot|restore|ps|init|prefix|prefix\?)
+                ps)
+                    words=(-a)
+                    ;;
+                exec|dir|dot-claude-clean|snapshot|restore|init|prefix|prefix\?|prefixes)
                     ;;
                 *)
                     # dockerclaude.sh <path> <session-name>
@@ -434,6 +437,14 @@ elif [ "${1:-}" == "prefix" ]; then
     if [ ! "${DCPREFIX}" == "" ]; then
         echo ${DCPREFIX}
     fi
+elif [ "${1:-}" == "prefixes" ]; then
+    shift
+    (
+        IFS=$'\n'
+        for prefix in $(docker ps -a --format json -f "name=dockerclaude$" | jq .Names | sed -E 's/"//g' | sed -E 's/dockerclaude$//g'); do
+            echo $prefix
+        done
+    )
 elif [ "${1:-}" == "prefix?" ]; then
     shift
     if [ "${DCPREFIX}" == "" ]; then
@@ -498,6 +509,14 @@ elif [ "${1:-}" == "rename-session" ]; then
 
     rename_session "$1" "$2"
 elif [ "${1:-}" == "ps" ]; then
+    if [ "${2:-}" == "-a" ]; then
+        for prefix in "" $($DCSELF prefixes); do
+            (DCPREFIX=$prefix $DCSELF ps)
+            echo
+        done
+        exit
+    fi
+
     if [ ! "${DCPREFIX}" == "" ]; then
         echo Prefix: ${DCPREFIX}
         echo
