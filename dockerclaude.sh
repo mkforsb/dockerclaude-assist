@@ -106,6 +106,10 @@ function acquire_mount {
     session=NULL
     [ -n "${2:-}" ] && session=$(sql_quote "$2")
 
+    # Mounting before ./mounts is set up would not reach the container, and the
+    # later self-bind from `make setup-mounts` would bury the mount out of reach.
+    check_mounts_dir || return 1
+
     init_mounts_db
 
     current=$(mounts_db " \

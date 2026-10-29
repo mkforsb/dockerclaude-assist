@@ -10,9 +10,11 @@ build:
 clean:
 	docker image rm -f ${DCIMAGEPREFIX}dockerclaude:latest
 
+# Binding ./mounts again would stack a new mount over, and hide, the existing
+# project mounts, so only bind it once.
 setup-mounts:
 	mkdir -p ./${DCPREFIX}mounts ./${DCPREFIX}dot-claude
-	sudo mount --bind ./${DCPREFIX}mounts ./${DCPREFIX}mounts
+	mountpoint -q ./${DCPREFIX}mounts || sudo mount --bind ./${DCPREFIX}mounts ./${DCPREFIX}mounts
 	sudo mount --make-rshared ./${DCPREFIX}mounts
 
 start-container:
