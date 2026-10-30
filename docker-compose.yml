@@ -5,6 +5,7 @@ services:
       - TERM
       - TERM_PROGRAM
       - TERM_PROGRAM_VERSION
+      - COLORTERM
       - TMUX
       - TZ=Europe/Stockholm
     image: ${DCIMAGEPREFIX:-}dockerclaude:${DCIMAGETAG:-latest}
