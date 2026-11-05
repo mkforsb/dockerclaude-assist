@@ -57,7 +57,7 @@ not the rest of your filesystem.
    ./dockerclaude.sh setup-mounts
    ```
 
-3. Start the container:
+3. Start the container (this also takes care of step 2 if it was skipped):
 
    ```sh
    ./dockerclaude.sh start-container
@@ -209,8 +209,7 @@ is also part of the Compose project name:
 
 ```sh
 export DCPREFIX=work-
-dockerclaude.sh setup-mounts      # also creates ./work-mounts and ./work-dot-claude
-dockerclaude.sh start-container
+dockerclaude.sh start-container   # also creates ./work-mounts and ./work-dot-claude
 dockerclaude.sh                   # session in work-dockerclaude
 ```
 

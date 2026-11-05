@@ -340,7 +340,10 @@ function setup_mounts {
     sudo mount --make-rshared "${DCMOUNTSDIR}"
 }
 
+# Starts the container, first setting up ./mounts if needed, as that must happen
+# before the container starts. That also makes this all a new instance needs.
 function start_container {
+    check_mounts_dir 2>/dev/null || setup_mounts
     DCIMAGETAG="$(image_tag)" docker compose -f "${DCDIR}/docker-compose.yml" up -d
 }
 
