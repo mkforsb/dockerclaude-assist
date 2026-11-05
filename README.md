@@ -276,6 +276,11 @@ to the `Dockerfile` never reach them. Every so often, rebuild with
 `dockerclaude.sh build`,
 start from `latest`, reinstall your tools and take a new snapshot.
 
+## GUI
+
+[extras/dclgui](extras/dclgui) is a simple GUI frontend for managing all
+instances, including a Doctor tab for finding and fixing problems.
+
 ## How to copy auth from host machine
 
 1. Copy `~/.claude/.credentials.json` to the dockerclaude `dot-claude` folder.
