@@ -418,7 +418,7 @@ _dockerclaude() {
 
     case "${COMP_CWORD}" in
         1)
-            words=(build clean setup-mounts start-container stop-container install exec dir dot-claude-clean snapshot restore mount umount rename-session ps init prefix prefix? prefixes)
+            words=(build-image clean-image setup-mounts start-container stop-container install exec dir dot-claude-clean snapshot restore mount umount rename-session ps init prefix prefix? prefixes)
             compopt -o filenames
             mapfile -t COMPREPLY < <(compgen -d -- "${cur}")
             ;;
@@ -442,7 +442,7 @@ _dockerclaude() {
                 ps)
                     words=(-a)
                     ;;
-                build|clean|setup-mounts|start-container|stop-container|exec|dir|dot-claude-clean|snapshot|restore|init|prefix|prefix\?|prefixes)
+                build-image|clean-image|setup-mounts|start-container|stop-container|exec|dir|dot-claude-clean|snapshot|restore|init|prefix|prefix\?|prefixes)
                     ;;
                 *)
                     # dockerclaude.sh <path> <session-name>
@@ -470,11 +470,14 @@ complete -F _dockerclaude dockerclaude.sh dockerclaude
 EOF
 }
 
-if [ "${1:-}" == "build" ]; then
+if [ "${1:-}" == "build-image" ]; then
+    set -x
     build_image
-elif [ "${1:-}" == "clean" ]; then
+elif [ "${1:-}" == "clean-image" ]; then
+    set -x
     clean_image
 elif [ "${1:-}" == "setup-mounts" ]; then
+    set -x
     setup_mounts
 elif [ "${1:-}" == "start-container" ]; then
     start_container
