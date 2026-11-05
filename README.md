@@ -44,20 +44,22 @@ not the rest of your filesystem.
 1. Build the image:
 
    ```sh
-   make build
+   ./dockerclaude.sh build
    ```
+
+   (`./dockerclaude.sh clean` removes the image again.)
 
 2. Make `./mounts` a shared mount point. This must happen **before** the
    container starts, and must be redone after every host reboot:
 
    ```sh
-   make setup-mounts
+   ./dockerclaude.sh setup-mounts
    ```
 
 3. Start the container:
 
    ```sh
-   make start-container
+   ./dockerclaude.sh start-container
    ```
 
 4. Log in. Either run `./dockerclaude.sh` and go through the login flow, or
@@ -146,12 +148,12 @@ dockerclaude.sh dot-claude-clean
 Stop the container:
 
 ```sh
-make stop-container
+dockerclaude.sh stop-container
 ```
 
-Note that `make stop-container` removes the container. Anything installed
+Note that `stop-container` removes the container. Anything installed
 with `dockerclaude.sh install` is lost and must be reinstalled after the next
-`make start-container`. Only `./dot-claude` and your mounted projects persist.
+`start-container`. Only `./dot-claude` and your mounted projects persist.
 To make a tool available permanently, add it to the `Dockerfile` or add a
 script to `installers/`.
 
@@ -166,12 +168,12 @@ is also part of the Compose project name:
 
 ```sh
 export DCPREFIX=work-
-make setup-mounts       # also creates ./work-mounts and ./work-dot-claude
-make start-container
-dockerclaude.sh         # session in work-dockerclaude
+dockerclaude.sh setup-mounts      # also creates ./work-mounts and ./work-dot-claude
+dockerclaude.sh start-container
+dockerclaude.sh                   # session in work-dockerclaude
 ```
 
-Every `dockerclaude.sh` and `make` command acts on the instance selected by
+Every `dockerclaude.sh` command acts on the instance selected by
 `DCPREFIX`, so it has to be set for all of them, not just for setup. Each
 instance needs its own login (see
 [copying auth](#how-to-copy-auth-from-host-machine), using
@@ -189,7 +191,7 @@ Instances share the `dockerclaude:latest` image by default. To give one its
 own image, e.g. to try out `Dockerfile` changes, also set `DCIMAGEPREFIX`:
 
 ```sh
-DCIMAGEPREFIX=test- make build   # builds test-dockerclaude:latest
+DCIMAGEPREFIX=test- dockerclaude.sh build   # builds test-dockerclaude:latest
 ```
 
 ## Snapshots
@@ -208,21 +210,22 @@ dockerclaude.sh restore    # loads the snapshot and starts the container from it
 `snapshot` commits the container to the image `dockerclaude:<prefix>snapshot`
 and saves that, including the base image, to a zstd-compressed file. It can be
 taken while the container is running (it is paused briefly), but is best taken
-between sessions. Restoring needs no network or `make build`. Use the same
+between sessions. Restoring needs no network or `build`. Use the same
 `DCIMAGEPREFIX` as when the snapshot was taken.
 
-`make start-container` keeps an existing container on the image it was created
+`start-container` keeps an existing container on the image it was created
 from, and otherwise starts from the snapshot if one is loaded. Set
 `DCIMAGETAG` to choose the tag explicitly, e.g. to go back to a fresh
 `latest`:
 
 ```sh
-make stop-container
-DCIMAGETAG=latest make start-container
+dockerclaude.sh stop-container
+DCIMAGETAG=latest dockerclaude.sh start-container
 ```
 
 Snapshots taken from a restored container grow a layer each time, and changes
-to the `Dockerfile` never reach them. Every so often, rebuild with `make build`,
+to the `Dockerfile` never reach them. Every so often, rebuild with
+`dockerclaude.sh build`,
 start from `latest`, reinstall your tools and take a new snapshot.
 
 ## How to copy auth from host machine

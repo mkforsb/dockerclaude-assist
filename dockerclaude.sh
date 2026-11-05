@@ -107,7 +107,7 @@ function acquire_mount {
     [ -n "${2:-}" ] && session=$(sql_quote "$2")
 
     # Mounting before ./mounts is set up would not reach the container, and the
-    # later self-bind from `make setup-mounts` would bury the mount out of reach.
+    # later self-bind from `setup-mounts` would bury the mount out of reach.
     check_mounts_dir || return 1
 
     init_mounts_db
@@ -313,14 +313,39 @@ function list_mounted_dirs {
         done
 }
 
-# Fails unless ./mounts is a shared mount point (see `make setup-mounts`),
+# Fails unless ./mounts is a shared mount point (see `setup-mounts`),
 # without which project mounts do not propagate into the running container.
 function check_mounts_dir {
     if ! mountpoint -q "${DCMOUNTSDIR}" || \
         [[ "$(findmnt -n -o PROPAGATION --mountpoint "${DCMOUNTSDIR}")" != *shared* ]]; then
-        echo "${DCMOUNTSDIR} is not mounted properly! (run 'make setup-mounts')" >&2
+        echo "${DCMOUNTSDIR} is not mounted properly! (run 'dockerclaude.sh setup-mounts')" >&2
         return 1
     fi
+}
+
+function build_image {
+    docker build -t "${DCIMAGEPREFIX:-}dockerclaude:latest" "${DCDIR}"
+}
+
+function clean_image {
+    docker image rm -f "${DCIMAGEPREFIX:-}dockerclaude:latest"
+}
+
+# Makes ./mounts a shared mount point, creating it and ./dot-claude if needed.
+# Binding ./mounts again would stack a new mount over, and hide, the existing
+# project mounts, so only bind it once.
+function setup_mounts {
+    mkdir -p "${DCMOUNTSDIR}" "${DCDIR}/${DCPREFIX}dot-claude"
+    mountpoint -q "${DCMOUNTSDIR}" || sudo mount --bind "${DCMOUNTSDIR}" "${DCMOUNTSDIR}"
+    sudo mount --make-rshared "${DCMOUNTSDIR}"
+}
+
+function start_container {
+    DCIMAGETAG="$(image_tag)" docker compose -f "${DCDIR}/docker-compose.yml" up -d
+}
+
+function stop_container {
+    docker compose -f "${DCDIR}/docker-compose.yml" down
 }
 
 # Prints the image tag to start the container from: $DCIMAGETAG if set, else
@@ -366,14 +391,14 @@ function restore_snapshot {
     fi
 
     if docker container inspect "${DCPREFIX}dockerclaude" >/dev/null 2>&1; then
-        echo "${DCPREFIX}dockerclaude: container already exists, run 'make stop-container' first" >&2
+        echo "${DCPREFIX}dockerclaude: container already exists, run 'dockerclaude.sh stop-container' first" >&2
         return 1
     fi
 
     check_mounts_dir
 
     zstd -dc "${DCSNAPSHOTFILE}" | docker load
-    cd "${DCDIR}" && DCIMAGETAG="${DCSNAPSHOTTAG}" make start-container
+    DCIMAGETAG="${DCSNAPSHOTTAG}" start_container
 }
 
 # Prints shell code that defines a `dockerclaude` function running this script
@@ -393,7 +418,7 @@ _dockerclaude() {
 
     case "${COMP_CWORD}" in
         1)
-            words=(install exec make dir dot-claude-clean snapshot restore mount umount rename-session ps init prefix prefix? prefixes)
+            words=(build clean setup-mounts start-container stop-container install exec dir dot-claude-clean snapshot restore mount umount rename-session ps init prefix prefix? prefixes)
             compopt -o filenames
             mapfile -t COMPREPLY < <(compgen -d -- "${cur}")
             ;;
@@ -402,10 +427,6 @@ _dockerclaude() {
                 install)
                     mapfile -t words < <(find "${_dockerclaude_dir}/installers" \
                         -maxdepth 1 -name '*.sh' -printf '%f\n' 2>/dev/null | sed 's/\.sh$//')
-                    ;;
-                make)
-                    mapfile -t words < <(sed -nE 's/^([A-Za-z0-9_-]+):.*/\1/p' \
-                        "${_dockerclaude_dir}/Makefile" 2>/dev/null)
                     ;;
                 mount)
                     compopt -o filenames
@@ -421,7 +442,7 @@ _dockerclaude() {
                 ps)
                     words=(-a)
                     ;;
-                exec|dir|dot-claude-clean|snapshot|restore|init|prefix|prefix\?|prefixes)
+                build|clean|setup-mounts|start-container|stop-container|exec|dir|dot-claude-clean|snapshot|restore|init|prefix|prefix\?|prefixes)
                     ;;
                 *)
                     # dockerclaude.sh <path> <session-name>
@@ -449,7 +470,17 @@ complete -F _dockerclaude dockerclaude.sh dockerclaude
 EOF
 }
 
-if [ "${1:-}" == "install" ]; then
+if [ "${1:-}" == "build" ]; then
+    build_image
+elif [ "${1:-}" == "clean" ]; then
+    clean_image
+elif [ "${1:-}" == "setup-mounts" ]; then
+    setup_mounts
+elif [ "${1:-}" == "start-container" ]; then
+    start_container
+elif [ "${1:-}" == "stop-container" ]; then
+    stop_container
+elif [ "${1:-}" == "install" ]; then
     shift
     perform_install "$@"
 elif [ "${1:-}" == "prefix" ]; then
@@ -475,9 +506,6 @@ elif [ "${1:-}" == "prefix?" ]; then
 elif [ "${1:-}" == "exec" ]; then
     shift
     docker compose -f "${DCDIR}/docker-compose.yml" exec -it dockerclaude bash -lc 'umask 002 && exec "$@"' bash "$@"
-elif [ "${1:-}" == "make" ]; then
-    shift
-    cd "${DCDIR}" && make "$@"
 elif [ "${1:-}" == "dir" ]; then
     shift
     echo "${DCDIR}"
@@ -620,9 +648,6 @@ elif [ "${1:-}" == "__list" ]; then
         sessions) list_sessions ;;
         mounts) list_mounted_dirs ;;
     esac
-elif [ "${1:-}" == "__image-tag" ]; then
-    # Used by `make start-container`.
-    image_tag
 elif [ $# -le 3 ] && [ "${1:-}" == "--stream" ] && [ -d "${2:-.}" ]; then
     start_session_streaming "${2:-.}" "${3:-}"
 elif [ $# -le 2 ] && [ -d "${1:-.}" ]; then
