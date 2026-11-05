@@ -38,6 +38,7 @@ not the rest of your filesystem.
 - `sqlite3`
 - `mountpoint` (from `util-linux`)
 - `zstd` (for snapshots)
+- `jq`
 
 ## Setup
 
@@ -102,6 +103,12 @@ Run an arbitrary command in the container:
 dockerclaude.sh exec bash
 ```
 
+Or just open a plain shell in it:
+
+```sh
+dockerclaude.sh bash
+```
+
 Mount a directory into the container without starting a session, e.g. to give
 an already-running session access to another project. This takes a reference
 on the mount just like a session does, so it stays mounted until it is
@@ -136,6 +143,33 @@ dockerclaude.sh ps
 #   /home/me/src/baz -> /mnt/-home-me-src-baz (refcount 1)
 ```
 
+`ps -a` does the same for every instance, including instances without a
+container.
+
+Print the prompts from `./dot-claude/history.jsonl`, oldest first and one per
+line:
+
+```sh
+dockerclaude.sh history | tail -n1
+```
+
+Check all instances for problems, printing `<problem>\t<command fixing it>` per
+problem (`-` if there is no such command) and failing if there are any:
+
+```sh
+dockerclaude.sh doctor
+# mounts/ not configured	dockerclaude setup-mounts
+# work-mounts/ non-empty but no work- container	DCPREFIX=work- dockerclaude force-clean-mounts
+```
+
+Clean up after a crash or reboot by unmounting and removing all mount points of
+an instance, or just the given ones, and dropping them from the mounts
+database. This also applies to mounts in use by running sessions:
+
+```sh
+dockerclaude.sh force-clean-mounts [SLUG...]
+```
+
 Wipe `./dot-claude`, keeping only credentials, `.claude.json`, `settings.json`
 and `skills`. Session history (`history.jsonl`, `projects`, `sessions`,
 `file-history`, `plans`, `session-env`, `shell-snapshots`) is first archived
@@ -156,6 +190,13 @@ with `dockerclaude.sh install` is lost and must be reinstalled after the next
 `start-container`. Only `./dot-claude` and your mounted projects persist.
 To make a tool available permanently, add it to the `Dockerfile` or add a
 script to `installers/`.
+
+To stop the container without removing it, so that `start-container` brings it
+back as it was:
+
+```sh
+dockerclaude.sh halt-container
+```
 
 ## Running several instances
 
@@ -205,6 +246,14 @@ quickly after a Docker wipe, snapshot it first:
 dockerclaude.sh snapshot   # commits the container, saves ./<prefix>snapshot.tar.zst
 # ... wipe Docker ...
 dockerclaude.sh restore    # loads the snapshot and starts the container from it
+```
+
+List the snapshots of all instances as `<size in bytes>\t<prefix>`, or delete
+the current instance's snapshot along with its image:
+
+```sh
+dockerclaude.sh snapshots-list
+dockerclaude.sh snapshot-delete
 ```
 
 `snapshot` commits the container to the image `dockerclaude:<prefix>snapshot`

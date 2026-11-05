@@ -348,6 +348,12 @@ function stop_container {
     docker compose -f "${DCDIR}/docker-compose.yml" down
 }
 
+# Stops the container without removing it, unlike `stop-container`, so that
+# `start-container` brings it back with everything installed in it.
+function halt_container {
+    docker compose -f "${DCDIR}/docker-compose.yml" stop
+}
+
 # Prints the image tag to start the container from: $DCIMAGETAG if set, else
 # the tag of the existing container (so it is never recreated from another
 # image by accident), else the snapshot if it is loaded, else latest.
@@ -401,6 +407,184 @@ function restore_snapshot {
     DCIMAGETAG="${DCSNAPSHOTTAG}" start_container
 }
 
+# Removes the snapshot file and, unless a container still uses it, the snapshot
+# image, so that `start-container` does not pick it up afterwards.
+function delete_snapshot {
+    local image="${DCIMAGEPREFIX:-}dockerclaude:${DCSNAPSHOTTAG}"
+
+    if [ ! -f "${DCSNAPSHOTFILE}" ]; then
+        echo "${DCPREFIX}dockerclaude: no snapshot at ${DCSNAPSHOTFILE}" >&2
+        return 1
+    fi
+
+    rm -f "${DCSNAPSHOTFILE}"
+    echo "Deleted ${DCSNAPSHOTFILE}"
+
+    if docker image inspect "${image}" >/dev/null 2>&1; then
+        docker image rm "${image}" >/dev/null 2>&1 \
+            || echo "Kept image ${image}, it is still in use"
+    fi
+}
+
+# Prints `<size in bytes>\t<prefix>` for every snapshot file, whichever instance
+# it belongs to. The prefix is empty for the default instance.
+function list_snapshots {
+    find "${DCDIR}" -mindepth 1 -maxdepth 1 -type f -name '*snapshot.tar.zst' -printf '%s\t%f\n' \
+        | sed 's/snapshot\.tar\.zst$//' \
+        | sort -t $'\t' -k 2
+}
+
+# Prints the prompts from ./dot-claude/history.jsonl, oldest first and one per
+# line, i.e. with whitespace in multi-line prompts collapsed. Skips lines that
+# are not valid JSON, such as one Claude Code is writing right now.
+function print_history {
+    local historyFile="${DCDIR}/${DCPREFIX}dot-claude/history.jsonl"
+
+    if [ -f "${historyFile}" ]; then
+        jq -Rr 'fromjson? | .display // empty | gsub("\\s+"; " ")' "${historyFile}"
+    fi
+}
+
+# Prints the prefix of every instance, one per line and starting with the empty
+# prefix of the default instance. Unlike `prefixes` this includes instances
+# without a container, going by what they left behind in this directory.
+function all_prefixes {
+    {
+        echo
+        "${DCSELF}" prefixes 2>/dev/null || true
+        find "${DCDIR}" -mindepth 1 -maxdepth 1 \
+            \( -name '*dot-claude' -o -name '*mounts' -o -name '*mounts.sqlite3' \
+               -o -name '*snapshot.tar.zst' \) -printf '%f\n' \
+            | sed -E 's/(dot-claude|mounts|mounts\.sqlite3|snapshot\.tar\.zst)$//'
+    } | sort -u
+}
+
+# Unmounts and removes the mount points of the given slugs (default: all of them,
+# in use or not) and forgets about them in the mounts database, for cleaning up
+# after a crash or reboot. Mount points are only ever removed with rmdir, so
+# nothing is deleted from a directory that turns out to still be mounted.
+function force_clean_mounts {
+    local slug rc=0
+    local -a slugs=("$@")
+
+    if [ $# -eq 0 ]; then
+        mapfile -t slugs < <(
+            {
+                find "${DCMOUNTSDIR}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null
+                mounts_db -readonly "select slug from mounts;" 2>/dev/null
+            } | sort -u
+        )
+    fi
+
+    [ -f "${DCMOUNTSDB}" ] && init_mounts_db
+
+    for slug in "${slugs[@]}"; do
+        if [[ -z "${slug}" || "${slug}" == *[!A-Za-z0-9-]* ]]; then
+            echo "${DCPREFIX}dockerclaude: invalid slug \`${slug}\`" >&2
+            rc=1
+        elif unmount_slug "${slug}" \
+            && { [ ! -d "${DCMOUNTSDIR}/${slug}" ] || rmdir "${DCMOUNTSDIR}/${slug}"; }; then
+            [ -f "${DCMOUNTSDB}" ] && mounts_db "delete from mounts where slug = '${slug}';"
+            echo "Cleaned ${slug}"
+        else
+            rc=1
+        fi
+    done
+
+    return "${rc}"
+}
+
+# Prints a line for `doctor`: the problem $1, a tab, and the command fixing it,
+# made up of the `dockerclaude` arguments $2..., or `-` if there is no such
+# command.
+function doctor_issue {
+    local issue="$1"
+    shift
+
+    if [ $# -eq 0 ]; then
+        printf '%s\t-\n' "${issue}"
+    else
+        printf '%s\t%sdockerclaude %s\n' "${issue}" "${DCPREFIX:+DCPREFIX=${DCPREFIX} }" "$*"
+    fi
+}
+
+# Prints the problems of the instance selected by DCPREFIX, see `doctor`. $1 is
+# 1 if the Docker daemon can be reached, since otherwise every container appears
+# to be missing.
+function doctor_instance {
+    local slug configured=1
+    local -a onDisk inDb
+    local -A isOnDisk=() isInDb=()
+
+    mapfile -t onDisk < <(
+        find "${DCMOUNTSDIR}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort
+    )
+    mapfile -t inDb < <(mounts_db -readonly "select slug from mounts order by 1;" 2>/dev/null)
+
+    if ! check_mounts_dir 2>/dev/null; then
+        configured=0
+        doctor_issue "${DCPREFIX}mounts/ not configured" setup-mounts
+    fi
+
+    if [ "${#onDisk[@]}" -gt 0 ] && [ "$1" == "1" ] \
+        && ! docker container inspect "${DCPREFIX}dockerclaude" >/dev/null 2>&1; then
+        doctor_issue "${DCPREFIX}mounts/ non-empty but no ${DCPREFIX:-default} container" \
+            force-clean-mounts
+    elif [ "${#inDb[@]}" -gt 0 ] && [ "${#onDisk[@]}" -eq 0 ]; then
+        doctor_issue "${DCPREFIX}mounts.sqlite3 non-empty but mounts directory is empty" \
+            force-clean-mounts
+    elif [ "${configured}" == "1" ]; then
+        for slug in "${onDisk[@]}"; do isOnDisk["${slug}"]=1; done
+        for slug in "${inDb[@]}"; do isInDb["${slug}"]=1; done
+
+        for slug in "${inDb[@]}"; do
+            if [ -z "${isOnDisk[${slug}]:-}" ]; then
+                doctor_issue "${DCPREFIX}mounts/${slug} in mounts database but not in filesystem" \
+                    force-clean-mounts "${slug}"
+            elif ! mountpoint -q "${DCMOUNTSDIR}/${slug}"; then
+                doctor_issue "${DCPREFIX}mounts/${slug} exists but is not mounted" \
+                    force-clean-mounts "${slug}"
+            fi
+        done
+
+        for slug in "${onDisk[@]}"; do
+            if [ -z "${isInDb[${slug}]:-}" ]; then
+                doctor_issue "${DCPREFIX}mounts/${slug} not in mounts database" \
+                    force-clean-mounts "${slug}"
+            fi
+        done
+    fi
+}
+
+# Prints `<problem>\t<fix>` for every problem found across all instances, see
+# doctor_issue. Fails if there are any.
+function doctor {
+    local prefix issues dockerUp=1
+    local -a prefixes
+
+    mapfile -t prefixes < <(all_prefixes)
+
+    issues=$(
+        if ! docker info >/dev/null 2>&1; then
+            dockerUp=0
+            DCPREFIX="" doctor_issue "Cannot reach the Docker daemon"
+        elif [ -z "$(docker image ls -q "${DCIMAGEPREFIX:-}dockerclaude")" ]; then
+            DCPREFIX="" doctor_issue "No dockerclaude image in Docker image store" build-image
+        fi
+
+        for prefix in "${prefixes[@]}"; do
+            DCPREFIX="${prefix}" "${DCSELF}" __doctor-instance "${dockerUp}"
+        done
+    )
+
+    if [ -z "${issues}" ]; then
+        echo "No issues found"
+    else
+        echo "${issues}"
+        return 1
+    fi
+}
+
 # Prints shell code that defines a `dockerclaude` function running this script
 # by its full path, and bash completion for it and dockerclaude.sh.
 function print_init {
@@ -418,7 +602,7 @@ _dockerclaude() {
 
     case "${COMP_CWORD}" in
         1)
-            words=(build-image clean-image setup-mounts start-container stop-container install exec dir dot-claude-clean snapshot restore mount umount rename-session ps init prefix prefix? prefixes)
+            words=(build-image clean-image setup-mounts start-container stop-container halt-container install exec bash dir dot-claude-clean snapshot snapshot-delete snapshots-list restore mount umount force-clean-mounts rename-session ps history doctor init prefix prefix? prefixes)
             compopt -o filenames
             mapfile -t COMPREPLY < <(compgen -d -- "${cur}")
             ;;
@@ -442,7 +626,7 @@ _dockerclaude() {
                 ps)
                     words=(-a)
                     ;;
-                build-image|clean-image|setup-mounts|start-container|stop-container|exec|dir|dot-claude-clean|snapshot|restore|init|prefix|prefix\?|prefixes)
+                build-image|clean-image|setup-mounts|start-container|stop-container|halt-container|exec|bash|dir|dot-claude-clean|snapshot|snapshot-delete|snapshots-list|restore|force-clean-mounts|history|doctor|init|prefix|prefix\?|prefixes)
                     ;;
                 *)
                     # dockerclaude.sh <path> <session-name>
@@ -483,6 +667,8 @@ elif [ "${1:-}" == "start-container" ]; then
     start_container
 elif [ "${1:-}" == "stop-container" ]; then
     stop_container
+elif [ "${1:-}" == "halt-container" ]; then
+    halt_container
 elif [ "${1:-}" == "install" ]; then
     shift
     perform_install "$@"
@@ -509,6 +695,8 @@ elif [ "${1:-}" == "prefix?" ]; then
 elif [ "${1:-}" == "exec" ]; then
     shift
     docker compose -f "${DCDIR}/docker-compose.yml" exec -it dockerclaude bash -lc 'umask 002 && exec "$@"' bash "$@"
+elif [ "${1:-}" == "bash" ]; then
+    docker exec -it "${DCPREFIX}dockerclaude" bash
 elif [ "${1:-}" == "dir" ]; then
     shift
     echo "${DCDIR}"
@@ -516,6 +704,10 @@ elif [ "${1:-}" == "dot-claude-clean" ]; then
     dot_claude_clean
 elif [ "${1:-}" == "snapshot" ]; then
     save_snapshot
+elif [ "${1:-}" == "snapshot-delete" ]; then
+    delete_snapshot
+elif [ "${1:-}" == "snapshots-list" ]; then
+    list_snapshots
 elif [ "${1:-}" == "restore" ]; then
     restore_snapshot
 elif [ "${1:-}" == "mount" ]; then
@@ -551,6 +743,9 @@ elif [ "${1:-}" == "umount" ]; then
     else
         echo "Unmounted ${targetDir} from ${DCPREFIX}dockerclaude:/mnt/${slug}"
     fi
+elif [ "${1:-}" == "force-clean-mounts" ]; then
+    shift
+    force_clean_mounts "$@"
 elif [ "${1:-}" == "rename-session" ]; then
     shift
     if [ $# -ne 2 ] || [ -z "$1" ] || [ -z "$2" ]; then
@@ -561,8 +756,10 @@ elif [ "${1:-}" == "rename-session" ]; then
     rename_session "$1" "$2"
 elif [ "${1:-}" == "ps" ]; then
     if [ "${2:-}" == "-a" ]; then
-        for prefix in "" $($DCSELF prefixes); do
-            (DCPREFIX=$prefix $DCSELF ps)
+        mapfile -t prefixes < <(all_prefixes)
+        for prefix in "${prefixes[@]}"; do
+            # One broken instance must not hide the others.
+            (DCPREFIX=$prefix "$DCSELF" ps) || true
             echo
         done
         exit
@@ -575,7 +772,9 @@ elif [ "${1:-}" == "ps" ]; then
 
     docker ps -as -f "name=^${DCPREFIX}dockerclaude$"
 
-    (IFS=$'\n' && for s in $(docker logs ${DCPREFIX}dockerclaude | tail -n2); do echo "> $s"; done)
+    if docker container inspect "${DCPREFIX}dockerclaude" >/dev/null 2>&1; then
+        (IFS=$'\n' && for s in $(docker logs ${DCPREFIX}dockerclaude | tail -n2); do echo "> $s"; done)
+    fi
 
     echo
     echo "Sessions/mounts:"
@@ -643,6 +842,10 @@ elif [ "${1:-}" == "ps" ]; then
             echo "Broken mount! ${slug} not present in refcount database!"
         fi
     done
+elif [ "${1:-}" == "history" ]; then
+    print_history
+elif [ "${1:-}" == "doctor" ]; then
+    doctor
 elif [ "${1:-}" == "init" ]; then
     print_init
 elif [ "${1:-}" == "__list" ]; then
@@ -651,6 +854,9 @@ elif [ "${1:-}" == "__list" ]; then
         sessions) list_sessions ;;
         mounts) list_mounted_dirs ;;
     esac
+elif [ "${1:-}" == "__doctor-instance" ]; then
+    # Used by `doctor`, once per instance.
+    doctor_instance "${2:-1}"
 elif [ $# -le 3 ] && [ "${1:-}" == "--stream" ] && [ -d "${2:-.}" ]; then
     start_session_streaming "${2:-.}" "${3:-}"
 elif [ $# -le 2 ] && [ -d "${1:-.}" ]; then
