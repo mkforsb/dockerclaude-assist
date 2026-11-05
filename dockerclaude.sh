@@ -215,6 +215,22 @@ function start_session {
         bash -lc "umask 002 && cd /mnt/$(slugify "${targetDir}") && claude"
 }
 
+# Starts a stream-json session in directory $1 (default: the current directory), named $2
+# (default: the directory's absolute path).
+function start_session_streaming {
+    local targetDir
+    targetDir=$(realpath "${1:-.}")
+
+    acquire_mount "${targetDir}" "session:${2:-${targetDir}}"
+
+    # From here on, always release the mount/refcount on exit, including when
+    # the session is interrupted or the exec fails.
+    trap "release_mount $(printf '%q' "${targetDir}")" EXIT
+
+    docker compose -f "${DCDIR}/docker-compose.yml" exec -i dockerclaude \
+        bash -lc "umask 002 && cd /mnt/$(slugify "${targetDir}") && claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --permission-prompt-tool stdio --permission-mode default --disallowedTools AskUserQuestion"
+}
+
 # Renames session $1 to $2, i.e. moves all mounts of `session:$1` and
 # `mount:$1` to `session:$2` and `mount:$2`.
 function rename_session {
@@ -607,6 +623,8 @@ elif [ "${1:-}" == "__list" ]; then
 elif [ "${1:-}" == "__image-tag" ]; then
     # Used by `make start-container`.
     image_tag
+elif [ $# -le 3 ] && [ "${1:-}" == "--stream" ] && [ -d "${2:-.}" ]; then
+    start_session_streaming "${2:-.}" "${3:-}"
 elif [ $# -le 2 ] && [ -d "${1:-.}" ]; then
     start_session "${1:-.}" "${2:-}"
 else
