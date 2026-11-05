@@ -1,29 +1,43 @@
 //! The main window.
 
-use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use iced::keyboard::{self, key};
+use iced::theme::Mode;
 use iced::widget::{
     Id, button, center, column, container, opaque, operation, responsive, row, rule, scrollable,
     space, stack, text, text_input, tooltip,
 };
-use iced::{Center, Color, Element, Event, Fill, FillPortion, Font, Subscription, Task, time};
+use iced::{
+    Center, Element, Event, Fill, FillPortion, Font, Subscription, Task, Theme, font, time,
+};
 
 use crate::dc::{self, Invocation, Output};
 use crate::parse::{Instance, Issue, Mount, Session, format_mib, truncate};
+use crate::style::{self, Icon};
 
 /// `ps -a` is slow, as docker has to work out the container sizes, hence the
 /// long period and the Refresh button.
 const OVERVIEW_PERIOD: Duration = Duration::from_secs(30);
 const DOCTOR_PERIOD: Duration = Duration::from_secs(10);
+/// How long a toast stays around, unless it reports an error.
+const TOAST_DURATION: Duration = Duration::from_secs(5);
 
-const SMALL: u32 = 13;
-const MONOSPACE_ADVANCE: f32 = 0.6 * SMALL as f32;
+const BODY: u32 = 14;
+const CAPTION: u32 = 13;
+const ICON: f32 = 16.0;
+const MONOSPACE_ADVANCE: f32 = 0.6 * CAPTION as f32;
 const LINE_HEIGHT: u32 = 18;
-const SIZE_LABEL_WIDTH: u32 = 190;
+const HEADER_HEIGHT: u32 = 47;
+const CONTENT_WIDTH: u32 = 860;
+const ROW_PADDING: [u16; 2] = [10, 14];
+
+const BOLD: Font = Font {
+    weight: font::Weight::Bold,
+    ..Font::DEFAULT
+};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Tab {
@@ -56,7 +70,6 @@ impl Refresh {
 #[derive(Debug, Clone, PartialEq)]
 enum PromptKind {
     Rename { old: String },
-    AddMount { session: Option<String> },
     AddSession,
     AddPrefix,
 }
@@ -87,21 +100,13 @@ impl Prompt {
     fn title(&self) -> String {
         match &self.kind {
             PromptKind::Rename { old } => format!("Rename session {old}"),
-            PromptKind::AddMount {
-                session: Some(name),
-            } => format!("Add mount to session {name}"),
-            PromptKind::AddMount { session: None } => "Add mount".to_owned(),
             PromptKind::AddSession => "Add session with mount".to_owned(),
             PromptKind::AddPrefix => "Add prefix".to_owned(),
         }
     }
 
-    fn asks_for_name(&self) -> bool {
-        !matches!(self.kind, PromptKind::AddMount { .. })
-    }
-
     fn asks_for_path(&self) -> bool {
-        !matches!(self.kind, PromptKind::Rename { .. } | PromptKind::AddPrefix)
+        self.kind == PromptKind::AddSession
     }
 
     fn name_placeholder(&self) -> &'static str {
@@ -114,29 +119,26 @@ impl Prompt {
     /// The command to run, or `None` if the input is not complete yet.
     fn invocation(&self) -> Option<Invocation> {
         let name = self.name.trim();
-        let path = expand_tilde(self.path.trim());
 
-        if self.kind == PromptKind::AddPrefix {
-            return normalize_prefix(name)
-                .map(|prefix| Invocation::new(&prefix, ["start-container"]));
-        }
-
-        let args = match &self.kind {
+        match &self.kind {
             PromptKind::Rename { old } if !name.is_empty() && name != old => {
-                vec!["rename-session", old, name]
+                Some(Invocation::new(&self.prefix, ["rename-session", old, name]))
             }
-            PromptKind::AddMount { session } if !path.is_empty() => match session {
-                Some(session) => vec!["mount", &path, session],
-                None => vec!["mount", &path],
-            },
-            PromptKind::AddSession if !name.is_empty() && !path.is_empty() => {
-                vec!["mount", &path, name]
+            PromptKind::AddSession if !name.is_empty() && !self.path.is_empty() => {
+                Some(mount_invocation(&self.prefix, &self.path, Some(name)))
             }
-            _ => return None,
-        };
-
-        Some(Invocation::new(&self.prefix, args))
+            PromptKind::AddPrefix => {
+                normalize_prefix(name).map(|prefix| Invocation::new(&prefix, ["start-container"]))
+            }
+            _ => None,
+        }
     }
+}
+
+fn mount_invocation(prefix: &str, path: &str, session: Option<&str>) -> Invocation {
+    let mut args = vec!["mount", path];
+    args.extend(session);
+    Invocation::new(prefix, args)
 }
 
 /// Makes `prefix` end in a separator, as everything named after it would run
@@ -152,15 +154,6 @@ fn normalize_prefix(prefix: &str) -> Option<String> {
         Some(prefix.to_owned())
     } else {
         Some(format!("{prefix}-"))
-    }
-}
-
-fn expand_tilde(path: &str) -> String {
-    match (path.strip_prefix('~'), env::var("HOME")) {
-        (Some(rest), Ok(home)) if rest.is_empty() || rest.starts_with('/') => {
-            format!("{home}{rest}")
-        }
-        _ => path.to_owned(),
     }
 }
 
@@ -189,13 +182,26 @@ enum Modal {
     Prompt(Prompt),
 }
 
+/// What a directory is being picked for.
+#[derive(Debug, Clone)]
+enum PickTarget {
+    Mount {
+        prefix: String,
+        session: Option<String>,
+    },
+    /// The open prompt.
+    Prompt,
+}
+
 struct Notice {
+    id: u64,
     message: String,
     is_error: bool,
 }
 
 struct App {
     script: Arc<PathBuf>,
+    mode: Mode,
     tab: Tab,
     instances: Vec<Instance>,
     overview_error: Option<String>,
@@ -204,13 +210,17 @@ struct App {
     doctor_error: Option<String>,
     doctor_refresh: Refresh,
     modal: Option<Modal>,
+    /// Whether the file chooser is open.
+    picking: bool,
     /// Commands started from the GUI that have not finished yet.
     running: Vec<Invocation>,
     notice: Option<Notice>,
+    last_notice_id: u64,
 }
 
 #[derive(Debug, Clone)]
 enum Message {
+    ThemeChanged(Mode),
     TabSelected(Tab),
     RefreshOverview,
     RefreshDoctor,
@@ -223,12 +233,14 @@ enum Message {
     Accept,
     Prompt(Prompt),
     NameChanged(String),
-    PathChanged(String),
+    PickDirectory(PickTarget),
+    DirectoryPicked(PickTarget, Result<Option<String>, String>),
     Submit,
     CloseModal,
     FocusNext,
     OpenBash(String),
     DismissNotice,
+    ExpireNotice(u64),
 }
 
 fn first_input_id() -> Id {
@@ -239,6 +251,7 @@ impl App {
     fn new(script: PathBuf) -> (Self, Task<Message>) {
         let mut app = Self {
             script: Arc::new(script),
+            mode: Mode::None,
             tab: Tab::Overview,
             instances: Vec::new(),
             overview_error: None,
@@ -247,12 +260,21 @@ impl App {
             doctor_error: None,
             doctor_refresh: Refresh::default(),
             modal: None,
+            picking: false,
             running: Vec::new(),
             notice: None,
+            last_notice_id: 0,
         };
 
-        let task = app.refresh_all();
+        let task = Task::batch([
+            iced::system::theme().map(Message::ThemeChanged),
+            app.refresh_all(),
+        ]);
         (app, task)
+    }
+
+    fn theme(&self) -> Theme {
+        style::theme(self.mode)
     }
 
     fn is_busy(&self, prefix: &str) -> bool {
@@ -299,34 +321,77 @@ impl App {
         })
     }
 
+    /// Shows a toast. Errors stay until dismissed, so as not to be missed.
+    fn notify(&mut self, message: String, is_error: bool) -> Task<Message> {
+        self.last_notice_id += 1;
+        let id = self.last_notice_id;
+
+        self.notice = Some(Notice {
+            id,
+            message,
+            is_error,
+        });
+
+        if is_error {
+            Task::none()
+        } else {
+            Task::perform(tokio::time::sleep(TOAST_DURATION), move |()| {
+                Message::ExpireNotice(id)
+            })
+        }
+    }
+
     fn finished(&mut self, command: Invocation, result: Result<Output, String>) -> Task<Message> {
         if let Some(index) = self.running.iter().position(|c| *c == command) {
             self.running.remove(index);
         }
 
-        self.notice = Some(match result {
-            Ok(output) if output.success => Notice {
-                message: match output.stdout.lines().last() {
+        let notify = match result {
+            Ok(output) if output.success => {
+                let message = match output.stdout.lines().last() {
                     Some(line) => format!("{command}: {line}"),
                     None => format!("{command}: done"),
-                },
-                is_error: false,
-            },
-            Ok(output) => Notice {
-                message: format!("{command} failed:\n{}", tail(&output.stderr, 6)),
-                is_error: true,
-            },
-            Err(error) => Notice {
-                message: error,
-                is_error: true,
-            },
-        });
+                };
+                self.notify(message, false)
+            }
+            Ok(output) => self.notify(
+                format!("{command} failed:\n{}", tail(&output.stderr, 6)),
+                true,
+            ),
+            Err(error) => self.notify(error, true),
+        };
 
-        self.refresh_all()
+        Task::batch([notify, self.refresh_all()])
+    }
+
+    fn directory_picked(
+        &mut self,
+        target: PickTarget,
+        result: Result<Option<String>, String>,
+    ) -> Task<Message> {
+        self.picking = false;
+
+        match (result, target) {
+            (Err(error), _) => self.notify(error, true),
+            (Ok(None), _) => Task::none(),
+            (Ok(Some(path)), PickTarget::Mount { prefix, session }) => {
+                self.start(mount_invocation(&prefix, &path, session.as_deref()))
+            }
+            (Ok(Some(path)), PickTarget::Prompt) => {
+                if let Some(Modal::Prompt(prompt)) = &mut self.modal {
+                    prompt.path = path;
+                }
+                Task::none()
+            }
+        }
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::ThemeChanged(mode) => {
+                self.mode = mode;
+                Task::none()
+            }
             Message::TabSelected(tab) => {
                 self.tab = tab;
                 Task::none()
@@ -387,12 +452,13 @@ impl App {
                 }
                 Task::none()
             }
-            Message::PathChanged(path) => {
-                if let Some(Modal::Prompt(prompt)) = &mut self.modal {
-                    prompt.path = path;
-                }
-                Task::none()
+            Message::PickDirectory(target) => {
+                self.picking = true;
+                Task::perform(dc::pick_directory(), move |result| {
+                    Message::DirectoryPicked(target.clone(), result)
+                })
             }
+            Message::DirectoryPicked(target, result) => self.directory_picked(target, result),
             Message::Submit => {
                 let command = match &self.modal {
                     Some(Modal::Prompt(prompt)) => prompt.invocation(),
@@ -412,17 +478,18 @@ impl App {
                 Task::none()
             }
             Message::FocusNext => operation::focus_next(),
-            Message::OpenBash(prefix) => {
-                if let Err(error) = dc::open_bash(&self.script, &prefix) {
-                    self.notice = Some(Notice {
-                        message: error,
-                        is_error: true,
-                    });
-                }
-                Task::none()
-            }
+            Message::OpenBash(prefix) => match dc::open_bash(&self.script, &prefix) {
+                Ok(()) => Task::none(),
+                Err(error) => self.notify(error, true),
+            },
             Message::DismissNotice => {
                 self.notice = None;
+                Task::none()
+            }
+            Message::ExpireNotice(id) => {
+                if self.notice.as_ref().is_some_and(|notice| notice.id == id) {
+                    self.notice = None;
+                }
                 Task::none()
             }
         }
@@ -432,6 +499,7 @@ impl App {
         let mut subscriptions = vec![
             time::every(OVERVIEW_PERIOD).map(|_| Message::RefreshOverview),
             time::every(DOCTOR_PERIOD).map(|_| Message::RefreshDoctor),
+            iced::system::theme_changes().map(Message::ThemeChanged),
         ];
 
         if self.modal.is_some() {
@@ -454,99 +522,138 @@ impl App {
             Tab::Doctor => self.view_doctor(),
         };
 
-        let page = column![
-            self.view_tabs(),
-            rule::horizontal(1),
-            container(scrollable(container(content).padding([0, 14])).height(Fill))
-                .height(Fill)
-                .padding([8, 0]),
-            self.view_status(),
-        ]
-        .spacing(0)
-        .padding(8);
+        let clamped = container(container(content).max_width(CONTENT_WIDTH))
+            .center_x(Fill)
+            .padding([20, 16]);
 
-        match &self.modal {
-            Some(modal) => stack![page, view_modal(modal)].into(),
-            None => page.into(),
+        let page = column![
+            self.view_header(),
+            rule::horizontal(1).style(style::separator),
+            scrollable(clamped)
+                .direction(scrollable::Direction::Vertical(
+                    scrollable::Scrollbar::new()
+                        .width(6)
+                        .scroller_width(6)
+                        .margin(2),
+                ))
+                .style(style::scrollbar)
+                .height(Fill),
+        ];
+
+        let mut layers = stack![page].push(self.view_toasts());
+
+        if let Some(modal) = &self.modal {
+            layers = layers.push(self.view_modal(modal));
         }
+
+        layers.into()
     }
 
-    fn view_tabs(&self) -> Element<'_, Message> {
-        let tab = |label, tab| {
-            button(text(label))
-                .style(if self.tab == tab {
-                    button::primary
-                } else {
-                    button::text
-                })
-                .on_press(Message::TabSelected(tab))
+    /// A header bar with a view switcher.
+    fn view_header(&self) -> Element<'_, Message> {
+        let tab = |label, tab, badge: Option<Element<'static, Message>>| {
+            button(
+                row![text(label).size(BODY).font(BOLD)]
+                    .push(badge)
+                    .spacing(6)
+                    .align_y(Center),
+            )
+            .padding([6, 14])
+            .style(style::tab(self.tab == tab))
+            .on_press(Message::TabSelected(tab))
         };
 
         let badge = (!self.issues.is_empty()).then(|| {
-            container(text(self.issues.len()).size(11).color(Color::WHITE))
-                .padding([1, 6])
-                .style(|theme: &iced::Theme| {
-                    container::Style::default()
-                        .background(theme.palette().danger)
-                        .border(iced::border::rounded(9))
-                })
+            container(text(self.issues.len()).size(11).font(BOLD))
+                .padding([0, 6])
+                .style(style::badge)
+                .into()
         });
 
-        row![tab("Overview", Tab::Overview), tab("Doctor", Tab::Doctor),]
-            .push(badge)
-            .push(space::horizontal())
-            .push(
-                button(text("Refresh").size(SMALL))
-                    .style(button::secondary)
-                    .on_press(Message::RefreshAll),
-            )
-            .spacing(6)
-            .padding([0, 0])
-            .align_y(Center)
-            .into()
+        let refresh = with_tooltip(
+            button(Icon::Refresh.view(ICON, true))
+                .padding(7)
+                .style(style::flat)
+                .on_press(Message::RefreshAll),
+            "Refresh",
+        );
+
+        container(
+            row![
+                container(refresh).width(Fill),
+                row![
+                    tab("Overview", Tab::Overview, None),
+                    tab("Doctor", Tab::Doctor, badge),
+                ]
+                .spacing(4),
+                space::horizontal(),
+            ]
+            .align_y(Center),
+        )
+        .height(HEADER_HEIGHT)
+        .padding([0, 6])
+        .align_y(Center)
+        .style(style::header)
+        .into()
     }
 
-    fn view_status(&self) -> Element<'_, Message> {
-        let mut status = column![].spacing(4);
+    /// Commands in progress and the last result, floating above the content.
+    fn view_toasts(&self) -> Element<'_, Message> {
+        let toast = |content: Element<'static, Message>| {
+            container(content)
+                .padding([8, 16])
+                .max_width(640)
+                .style(style::toast)
+        };
+
+        let mut toasts = column![].spacing(8).align_x(Center);
 
         for command in &self.running {
-            status = status.push(text(format!("Running {command}…")).size(SMALL));
+            toasts = toasts.push(toast(
+                text(format!("Running {command}…")).size(CAPTION).into(),
+            ));
         }
 
         if let Some(notice) = &self.notice {
-            status = status.push(
+            let message = text(notice.message.clone()).size(CAPTION);
+
+            toasts = toasts.push(toast(
                 row![
-                    text(&notice.message)
-                        .size(SMALL)
-                        .width(Fill)
-                        .style(if notice.is_error {
-                            text::danger
-                        } else {
-                            text::default
-                        }),
-                    small_button("Dismiss")
-                        .style(button::text)
+                    if notice.is_error {
+                        message.style(style::toast_error)
+                    } else {
+                        message
+                    },
+                    button(text("Dismiss").size(CAPTION))
+                        .padding([3, 10])
+                        .style(style::toast_button)
                         .on_press(Message::DismissNotice),
                 ]
-                .align_y(Center),
-            );
+                .spacing(12)
+                .align_y(Center)
+                .into(),
+            ));
         }
 
-        container(status).padding([4, 14]).into()
+        container(toasts)
+            .center_x(Fill)
+            .align_bottom(Fill)
+            .padding(16)
+            .into()
     }
 
     fn view_overview(&self) -> Element<'_, Message> {
         if self.instances.is_empty() {
             return match &self.overview_error {
-                Some(error) => text(error).style(text::danger).into(),
-                None => text("Loading…").into(),
+                Some(error) => text(error).style(style::error).into(),
+                None => text("Loading…").style(style::dim).into(),
             };
         }
 
-        let mut list = column![].spacing(12).width(Fill);
+        let mut list = column![].spacing(32).width(Fill);
 
         if let Some(error) = &self.overview_error {
-            list = list.push(text(error).size(SMALL).style(text::danger));
+            list = list.push(text(error).size(CAPTION).style(style::error));
         }
 
         for instance in &self.instances {
@@ -554,8 +661,11 @@ impl App {
         }
 
         list.push(
-            small_button("+ Add prefix")
-                .on_press(Message::Prompt(Prompt::new("", PromptKind::AddPrefix))),
+            container(
+                pill_with_icon(Icon::Add, "Add prefix", true)
+                    .on_press(Message::Prompt(Prompt::new("", PromptKind::AddPrefix))),
+            )
+            .center_x(Fill),
         )
         .into()
     }
@@ -567,35 +677,78 @@ impl App {
         let running = instance.container.as_ref().is_some_and(|c| c.running);
         let has_snapshot = instance.snapshot_bytes.is_some();
 
+        let title = row![
+            text(format!(
+                "Prefix: {}",
+                if prefix.is_empty() { "none" } else { prefix }
+            ))
+            .size(15)
+            .font(BOLD)
+            .width(Fill),
+            pill_with_icon(Icon::Terminal, "Bash", running)
+                .on_press_maybe(running.then(|| Message::OpenBash(prefix.to_owned()))),
+        ]
+        .align_y(Center)
+        .padding([0, 4]);
+
         let start_stop = if running {
-            small_button("⏹️").on_press_maybe(idle.then(|| {
-                Message::Confirm(
-                    Confirmation::new(prefix, ["halt-container"])
-                        .detail("Sessions running in the container are terminated."),
-                )
-            }))
+            with_tooltip(
+                icon_button(
+                    Icon::Stop,
+                    style::regular_circular,
+                    idle.then(|| {
+                        Message::Confirm(
+                            Confirmation::new(prefix, ["halt-container"])
+                                .detail("Sessions running in the container are terminated."),
+                        )
+                    }),
+                ),
+                "Stop",
+            )
         } else {
-            small_button("▶️").on_press_maybe(
-                idle.then(|| Message::Run(Invocation::new(prefix, ["start-container"]))),
+            with_tooltip(
+                icon_button(
+                    Icon::Start,
+                    style::regular_circular,
+                    idle.then(|| Message::Run(Invocation::new(prefix, ["start-container"]))),
+                ),
+                "Start",
             )
         };
 
-        let remove_container = delete_button().on_press_maybe((idle && exists).then(|| {
-            Message::Confirm(
-                Confirmation::new(prefix, ["stop-container"])
-                    .detail("Removes the container. Anything installed in it is lost."),
-            )
-        }));
+        let remove_container = with_tooltip(
+            icon_button(
+                Icon::Close,
+                style::flat_circular,
+                (idle && exists).then(|| {
+                    Message::Confirm(
+                        Confirmation::new(prefix, ["stop-container"])
+                            .detail("Removes the container. Anything installed in it is lost."),
+                    )
+                }),
+            ),
+            "Remove container",
+        );
 
-        let delete_snapshot = delete_button().on_press_maybe((idle && has_snapshot).then(|| {
-            Message::Confirm(
-                Confirmation::new(prefix, ["snapshot-delete"])
-                    .detail("Deletes the snapshot file and image."),
-            )
-        }));
+        let container_size = instance.container.as_ref().and_then(|c| c.size_bytes);
+        let container_row = action_row(
+            row![
+                container(space())
+                    .width(8)
+                    .height(8)
+                    .style(style::status_dot(running)),
+                text(if running { "Running" } else { "Stopped" }).size(BODY),
+            ]
+            .spacing(8)
+            .align_y(Center),
+            size_label("Container", container_size),
+            row![start_stop, remove_container]
+                .spacing(6)
+                .align_y(Center),
+        );
 
         let snapshot = Confirmation::new(prefix, ["snapshot"]);
-        let take_snapshot = small_button("Snapshot").on_press_maybe((idle && exists).then(|| {
+        let take_snapshot = pill("Snapshot").on_press_maybe((idle && exists).then(|| {
             if has_snapshot {
                 Message::Confirm(snapshot.clone().detail("Replaces the existing snapshot."))
             } else {
@@ -603,69 +756,39 @@ impl App {
             }
         }));
 
-        let restore = small_button("Restore").on_press_maybe(
+        let restore = pill("Restore").on_press_maybe(
             (idle && has_snapshot && !exists)
                 .then(|| Message::Run(Invocation::new(prefix, ["restore"]))),
         );
-        let restore: Element<'_, Message> = if has_snapshot && exists {
-            tooltip(
-                restore,
-                container(text("Remove the container first").size(SMALL))
-                    .padding(6)
-                    .style(container::rounded_box),
-                tooltip::Position::Bottom,
-            )
-            .into()
+        let restore = if has_snapshot && exists {
+            with_tooltip(restore, "Remove the container first")
         } else {
             restore.into()
         };
 
-        let size_label = |label: &str, bytes: Option<u64>| {
-            let size = bytes.map_or("-".to_owned(), format_mib);
-            text(format!("{label} size: {size}"))
-                .size(SMALL)
-                .width(SIZE_LABEL_WIDTH)
-        };
-
-        let container_size = instance.container.as_ref().and_then(|c| c.size_bytes);
-        let header = column![
-            row![
-                text(format!(
-                    "Prefix: {}",
-                    if prefix.is_empty() { "none" } else { prefix }
-                ))
-                .font(Font {
-                    weight: iced::font::Weight::Bold,
-                    ..Font::DEFAULT
+        let delete_snapshot = with_tooltip(
+            icon_button(
+                Icon::Close,
+                style::flat_circular,
+                (idle && has_snapshot).then(|| {
+                    Message::Confirm(
+                        Confirmation::new(prefix, ["snapshot-delete"])
+                            .detail("Deletes the snapshot file and image."),
+                    )
                 }),
-                space::horizontal(),
-                start_stop,
-                text(if running { "Running" } else { "Stopped" })
-                    .size(SMALL)
-                    .style(if running {
-                        text::success
-                    } else {
-                        text::secondary
-                    }),
-                remove_container,
-                size_label("Container", container_size),
-            ]
-            .spacing(8)
-            .align_y(Center),
-            row![
-                small_button("Bash")
-                    .on_press_maybe((running).then(|| Message::OpenBash(prefix.to_owned()))),
-                space::horizontal(),
-                delete_snapshot,
-                size_label("Snapshot", instance.snapshot_bytes),
-            ]
-            .spacing(8)
-            .align_y(Center),
-            row![space::horizontal(), take_snapshot, restore].spacing(8),
-        ]
-        .spacing(4);
+            ),
+            "Delete snapshot",
+        );
 
-        let mut log = column![text("Log:").size(SMALL)].spacing(2);
+        let snapshot_row = action_row(
+            text("Snapshot").size(BODY),
+            size_label("Snapshot", instance.snapshot_bytes),
+            row![take_snapshot, restore, delete_snapshot]
+                .spacing(6)
+                .align_y(Center),
+        );
+
+        let mut log = column![text("Log").size(BODY)].spacing(3);
         for line in &instance.log {
             log = log.push(one_line(line));
         }
@@ -674,34 +797,50 @@ impl App {
         }
 
         let last_prompt = column![
-            text("Last prompt:").size(SMALL),
+            text("Last prompt").size(BODY),
             one_line(instance.last_prompt.as_deref().unwrap_or("-")),
         ]
-        .spacing(2);
+        .spacing(3);
 
-        let mut sessions = column![
-            row![
-                text("Session").size(SMALL).width(FillPortion(1)),
-                text("Mount(s)").size(SMALL).width(FillPortion(1)),
-            ],
-            rule::horizontal(1),
+        let details = boxed_list([
+            container_row,
+            snapshot_row,
+            container(log).padding(ROW_PADDING).into(),
+            container(last_prompt).padding(ROW_PADDING).into(),
+        ]);
+
+        let columns = row![
+            text("Session")
+                .size(CAPTION)
+                .font(BOLD)
+                .style(style::dim)
+                .width(FillPortion(1)),
+            text("Mount(s)")
+                .size(CAPTION)
+                .font(BOLD)
+                .style(style::dim)
+                .width(FillPortion(1)),
         ]
-        .spacing(4);
+        .padding([0, 18]);
 
-        for session in &instance.sessions {
-            sessions = sessions
-                .push(self.view_session(prefix, session))
-                .push(rule::horizontal(1));
-        }
+        let add_session = container(
+            pill_with_icon(Icon::Add, "Add session w/ mount", idle).on_press_maybe(
+                idle.then(|| Message::Prompt(Prompt::new(prefix, PromptKind::AddSession))),
+            ),
+        )
+        .padding(ROW_PADDING)
+        .into();
 
-        sessions = sessions.push(small_button("+ Add session w/ mount").on_press_maybe(
-            idle.then(|| Message::Prompt(Prompt::new(prefix, PromptKind::AddSession))),
-        ));
+        let sessions = boxed_list(
+            instance
+                .sessions
+                .iter()
+                .map(|session| self.view_session(prefix, session))
+                .chain([add_session]),
+        );
 
-        container(column![header, log, last_prompt, sessions].spacing(10))
-            .padding(10)
-            .width(Fill)
-            .style(container::bordered_box)
+        column![title, details, columns, sessions]
+            .spacing(10)
             .into()
     }
 
@@ -710,25 +849,24 @@ impl App {
 
         let name: Element<'_, Message> = match &session.name {
             Some(name) => row![
-                small_button("Rename").on_press_maybe(idle.then(|| {
+                column![text(name).size(BODY)]
+                    .push(
+                        (!session.running)
+                            .then(|| { text("Not running").size(CAPTION).style(style::dim) })
+                    )
+                    .spacing(2)
+                    .width(Fill),
+                pill("Rename").on_press_maybe(idle.then(|| {
                     Message::Prompt(Prompt::new(
                         prefix,
                         PromptKind::Rename { old: name.clone() },
                     ))
                 })),
-                text(name).size(SMALL),
             ]
-            .push(
-                (!session.running)
-                    .then(|| text("(not running)").size(SMALL).style(text::secondary)),
-            )
             .spacing(8)
             .align_y(Center)
             .into(),
-            None => text("(no session)")
-                .size(SMALL)
-                .style(text::secondary)
-                .into(),
+            None => text("No session").size(BODY).style(style::dim).into(),
         };
 
         let mut mounts = column![].spacing(4);
@@ -736,50 +874,72 @@ impl App {
         for mount in &session.mounts {
             mounts = mounts.push(
                 row![
-                    delete_button().on_press_maybe(
-                        idle.then(|| Message::Confirm(remove_mount(prefix, mount)))
+                    text(&mount.label)
+                        .size(BODY)
+                        .width(Fill)
+                        .style(move |theme: &Theme| if mount.broken {
+                            style::error(theme)
+                        } else {
+                            text::Style::default()
+                        }),
+                    with_tooltip(
+                        icon_button(
+                            Icon::Close,
+                            style::flat_circular,
+                            idle.then(|| Message::Confirm(remove_mount(prefix, mount))),
+                        ),
+                        "Remove mount",
                     ),
-                    text(&mount.label).size(SMALL).style(if mount.broken {
-                        text::danger
-                    } else {
-                        text::default
-                    }),
                 ]
                 .spacing(8)
                 .align_y(Center),
             );
         }
 
-        mounts = mounts.push(small_button("+ Add mount").on_press_maybe(idle.then(|| {
-            Message::Prompt(Prompt::new(
-                prefix,
-                PromptKind::AddMount {
+        let can_pick = idle && !self.picking;
+
+        mounts = mounts.push(
+            pill_with_icon(Icon::Add, "Add mount", can_pick).on_press_maybe(can_pick.then(|| {
+                Message::PickDirectory(PickTarget::Mount {
+                    prefix: prefix.to_owned(),
                     session: session.name.clone(),
-                },
-            ))
-        })));
+                })
+            })),
+        );
 
         row![
             container(name).width(FillPortion(1)),
             container(mounts).width(FillPortion(1)),
         ]
+        .spacing(16)
+        .padding(ROW_PADDING)
         .into()
     }
 
     fn view_doctor(&self) -> Element<'_, Message> {
-        let mut list = column![].spacing(6).width(Fill);
+        let mut list = column![].spacing(12).width(Fill);
 
         if let Some(error) = &self.doctor_error {
-            list = list.push(text(error).style(text::danger));
+            list = list.push(text(error).style(style::error));
         }
 
         if self.issues.is_empty() && self.doctor_error.is_none() {
-            list = list.push(text("No issues found"));
+            return container(
+                column![
+                    Icon::Check.view_large(),
+                    text("No issues found").size(20).font(BOLD),
+                ]
+                .spacing(12)
+                .align_x(Center),
+            )
+            .center_x(Fill)
+            .padding(80)
+            .into();
         }
 
-        for issue in &self.issues {
+        let rows = self.issues.iter().map(|issue| {
             let fix = issue.fix.as_ref().map(|fix| {
-                small_button("fix").on_press_maybe((!self.is_busy(&fix.prefix)).then(|| {
+                pill("Fix").on_press_maybe((!self.is_busy(&fix.prefix)).then(|| {
                     Message::Confirm(Confirmation {
                         command: fix.clone(),
                         detail: None,
@@ -787,17 +947,117 @@ impl App {
                 }))
             });
 
-            list = list
-                .push(
-                    row![text(&issue.description).size(SMALL).width(Fill)]
-                        .push(fix)
-                        .spacing(8)
-                        .align_y(Center),
-                )
-                .push(rule::horizontal(1));
+            row![text(&issue.description).size(BODY).width(Fill)]
+                .push(fix)
+                .spacing(12)
+                .align_y(Center)
+                .padding(ROW_PADDING)
+                .into()
+        });
+
+        if !self.issues.is_empty() {
+            list = list.push(boxed_list(rows));
         }
 
         list.into()
+    }
+
+    /// An alert dialog.
+    fn view_modal<'a>(&self, modal: &'a Modal) -> Element<'a, Message> {
+        let heading = |label: String| text(label).size(16).font(BOLD).width(Fill).center();
+        let response = |label| {
+            button(text(label).size(BODY).width(Fill).center())
+                .width(Fill)
+                .padding([9, 14])
+        };
+        let cancel = response("Cancel")
+            .style(style::regular)
+            .on_press(Message::CloseModal);
+
+        let dialog: Element<'_, Message> = match modal {
+            Modal::Confirm(confirmation) => {
+                column![heading(format!("Run `{}`?", confirmation.command))]
+                    .push(confirmation.detail.as_ref().map(|detail| {
+                        text(detail)
+                            .size(BODY)
+                            .style(style::dim)
+                            .width(Fill)
+                            .center()
+                    }))
+                    .push(
+                        row![
+                            cancel,
+                            response("Run")
+                                .style(style::destructive)
+                                .on_press(Message::Accept),
+                        ]
+                        .spacing(12),
+                    )
+                    .spacing(14)
+                    .into()
+            }
+            Modal::Prompt(prompt) => {
+                let submit = prompt.invocation().map(|_| Message::Submit);
+
+                let mut form = column![
+                    heading(prompt.title()),
+                    text_input(prompt.name_placeholder(), &prompt.name)
+                        .id(first_input_id())
+                        .size(BODY)
+                        .padding(9)
+                        .style(style::entry)
+                        .on_input(Message::NameChanged)
+                        .on_submit_maybe(submit.clone()),
+                ]
+                .spacing(14);
+
+                if prompt.asks_for_path() {
+                    let label = if prompt.path.is_empty() {
+                        "Choose directory…"
+                    } else {
+                        prompt.path.as_str()
+                    };
+
+                    form = form.push(
+                        button(
+                            row![
+                                Icon::Folder.view(ICON, !self.picking),
+                                text(label).size(BODY).width(Fill),
+                            ]
+                            .spacing(8)
+                            .align_y(Center),
+                        )
+                        .width(Fill)
+                        .padding([9, 12])
+                        .style(style::regular)
+                        .on_press_maybe(
+                            (!self.picking).then_some(Message::PickDirectory(PickTarget::Prompt)),
+                        ),
+                    );
+                }
+
+                form.push(
+                    row![
+                        cancel,
+                        response("OK")
+                            .style(style::suggested)
+                            .on_press_maybe(submit),
+                    ]
+                    .spacing(12),
+                )
+                .into()
+            }
+        };
+
+        opaque(
+            center(
+                container(dialog)
+                    .padding(24)
+                    .max_width(460)
+                    .style(style::dialog),
+            )
+            .style(style::scrim),
+        )
     }
 }
 
@@ -816,12 +1076,84 @@ fn remove_mount(prefix: &str, mount: &Mount) -> Confirmation {
     }
 }
 
-fn small_button(label: &str) -> button::Button<'_, Message> {
-    button(text(label).size(SMALL)).padding([2, 8])
+fn pill(label: &str) -> button::Button<'_, Message> {
+    button(text(label).size(BODY))
+        .padding([5, 12])
+        .style(style::regular)
 }
 
-fn delete_button<'a>() -> button::Button<'a, Message> {
-    small_button("x").style(button::danger)
+fn pill_with_icon<'a>(icon: Icon, label: &'a str, enabled: bool) -> button::Button<'a, Message> {
+    button(
+        row![icon.view(ICON, enabled), text(label).size(BODY)]
+            .spacing(6)
+            .align_y(Center),
+    )
+    .padding([5, 12])
+    .style(style::regular)
+}
+
+fn icon_button<'a>(
+    icon: Icon,
+    style: fn(&Theme, button::Status) -> button::Style,
+    on_press: Option<Message>,
+) -> button::Button<'a, Message> {
+    button(icon.view(ICON, on_press.is_some()))
+        .padding(6)
+        .style(style)
+        .on_press_maybe(on_press)
+}
+
+fn with_tooltip<'a>(
+    content: impl Into<Element<'a, Message>>,
+    tip: &'a str,
+) -> Element<'a, Message> {
+    tooltip(
+        content,
+        container(text(tip).size(CAPTION))
+            .padding([5, 10])
+            .style(style::tooltip),
+        tooltip::Position::Bottom,
+    )
+    .gap(4)
+    .into()
+}
+
+fn size_label(label: &str, bytes: Option<u64>) -> String {
+    let size = bytes.map_or("-".to_owned(), format_mib);
+    format!("{label} size: {size}")
+}
+
+/// A row of a boxed list, with a title and subtitle and something to do on the
+/// right.
+fn action_row<'a>(
+    title: impl Into<Element<'a, Message>>,
+    subtitle: String,
+    suffix: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    row![
+        column![title.into(), text(subtitle).size(CAPTION).style(style::dim)]
+            .spacing(2)
+            .width(Fill),
+        suffix.into(),
+    ]
+    .spacing(12)
+    .align_y(Center)
+    .padding(ROW_PADDING)
+    .into()
+}
+
+/// A card of rows with separators between them.
+fn boxed_list<'a>(rows: impl IntoIterator<Item = Element<'a, Message>>) -> Element<'a, Message> {
+    let mut list = column![];
+
+    for (index, row) in rows.into_iter().enumerate() {
+        if index > 0 {
+            list = list.push(rule::horizontal(1).style(style::separator));
+        }
+        list = list.push(row);
+    }
+
+    container(list).width(Fill).style(style::card).into()
 }
 
 /// A line of monospace text, cut off with an ellipsis if it does not fit.
@@ -830,12 +1162,12 @@ fn one_line(line: &str) -> Element<'_, Message> {
         let columns = (size.width / MONOSPACE_ADVANCE) as usize;
 
         text(truncate(line, columns))
-            .size(SMALL)
+            .size(CAPTION)
             .font(Font::MONOSPACE)
+            .style(style::dim)
             .wrapping(text::Wrapping::None)
             .into()
     }))
-    .padding(iced::Padding::ZERO.left(12))
     .height(LINE_HEIGHT)
     .clip(true)
     .into()
@@ -847,87 +1179,10 @@ fn tail(output: &str, lines: usize) -> String {
     all[all.len().saturating_sub(lines)..].join("\n")
 }
 
-fn view_modal(modal: &Modal) -> Element<'_, Message> {
-    let cancel = button("Cancel")
-        .style(button::secondary)
-        .on_press(Message::CloseModal);
-
-    let dialog: Element<'_, Message> = match modal {
-        Modal::Confirm(confirmation) => column![text(format!("Run `{}`?", confirmation.command))]
-            .push(
-                confirmation
-                    .detail
-                    .as_ref()
-                    .map(|detail| text(detail).size(SMALL).style(text::secondary)),
-            )
-            .push(
-                row![
-                    space::horizontal(),
-                    cancel,
-                    button("Run")
-                        .style(button::danger)
-                        .on_press(Message::Accept),
-                ]
-                .spacing(8),
-            )
-            .spacing(12)
-            .into(),
-        Modal::Prompt(prompt) => {
-            let submit = prompt.invocation().map(|_| Message::Submit);
-            let mut form = column![text(prompt.title())].spacing(12);
-
-            if prompt.asks_for_name() {
-                form = form.push(
-                    text_input(prompt.name_placeholder(), &prompt.name)
-                        .id(first_input_id())
-                        .on_input(Message::NameChanged)
-                        .on_submit_maybe(submit.clone()),
-                );
-            }
-
-            if prompt.asks_for_path() {
-                let input = text_input("Absolute path of a directory", &prompt.path)
-                    .on_input(Message::PathChanged)
-                    .on_submit_maybe(submit.clone());
-
-                form = form.push(if prompt.asks_for_name() {
-                    input
-                } else {
-                    input.id(first_input_id())
-                });
-            }
-
-            form.push(
-                row![
-                    space::horizontal(),
-                    cancel,
-                    button("OK").on_press_maybe(submit),
-                ]
-                .spacing(8),
-            )
-            .into()
-        }
-    };
-
-    opaque(
-        center(
-            container(dialog)
-                .padding(16)
-                .max_width(560)
-                .style(container::bordered_box),
-        )
-        .style(|_| {
-            container::Style::default().background(Color {
-                a: 0.6,
-                ..Color::BLACK
-            })
-        }),
-    )
-}
-
 pub fn run(script: PathBuf) -> iced::Result {
     iced::application(move || App::new(script.clone()), App::update, App::view)
         .title("dclgui")
+        .theme(App::theme)
         .subscription(App::subscription)
         .window_size((980.0, 720.0))
         .run()
@@ -970,17 +1225,15 @@ mod tests {
     }
 
     #[test]
-    fn add_mount_prompt_passes_the_session_if_any() {
-        let session = Some("foo".to_owned());
-        let mut prompt = Prompt::new("", PromptKind::AddMount { session });
-
-        assert_eq!(args(&prompt), None);
-
-        prompt.path = "/tmp/a".to_owned();
-        assert_eq!(args(&prompt).unwrap(), ["mount", "/tmp/a", "foo"]);
-
-        prompt.kind = PromptKind::AddMount { session: None };
-        assert_eq!(args(&prompt).unwrap(), ["mount", "/tmp/a"]);
+    fn mounts_are_added_to_their_session_if_any() {
+        assert_eq!(
+            mount_invocation("work-", "/tmp/a", Some("foo")),
+            Invocation::new("work-", ["mount", "/tmp/a", "foo"])
+        );
+        assert_eq!(
+            mount_invocation("", "/tmp/a", None),
+            Invocation::new("", ["mount", "/tmp/a"])
+        );
     }
 
     #[test]

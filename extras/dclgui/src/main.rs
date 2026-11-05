@@ -5,6 +5,7 @@ mod app;
 mod askpass;
 mod dc;
 mod parse;
+mod style;
 
 fn main() -> iced::Result {
     if std::env::var_os(dc::ASKPASS_ENV).is_some() {
@@ -15,6 +16,8 @@ fn main() -> iced::Result {
         eprintln!("dclgui: dockerclaude.sh not found, set DCLGUI_SCRIPT to its path");
         std::process::exit(1);
     };
+
+    dc::watch_for_picker_failures();
 
     app::run(script)
 }

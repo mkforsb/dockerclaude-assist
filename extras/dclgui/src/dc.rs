@@ -7,6 +7,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{self, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use iced::futures::future::join_all;
 
@@ -196,6 +197,48 @@ pub async fn load_issues(script: Arc<PathBuf>) -> Result<Vec<Issue>, String> {
     }
 
     Ok(issues)
+}
+
+/// Set when rfd reports having no way of showing a file chooser. It tells callers
+/// nothing but "no directory was picked", the same as if the user cancelled.
+static PICKER_FAILED: AtomicBool = AtomicBool::new(false);
+
+struct PickerFailureLog;
+
+impl log::Log for PickerFailureLog {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() == log::Level::Error && metadata.target().starts_with("rfd")
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            PICKER_FAILED.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+/// Lets [`pick_directory`] tell a failure from the user cancelling.
+pub fn watch_for_picker_failures() {
+    if log::set_logger(&PickerFailureLog).is_ok() {
+        log::set_max_level(log::LevelFilter::Error);
+    }
+}
+
+/// Asks the user for a directory, by way of the XDG desktop portal or else zenity.
+/// Returns `None` if the user cancels.
+pub async fn pick_directory() -> Result<Option<String>, String> {
+    let directory = rfd::AsyncFileDialog::new()
+        .set_title("Choose a directory to mount")
+        .pick_folder()
+        .await;
+
+    if directory.is_none() && PICKER_FAILED.swap(false, Ordering::Relaxed) {
+        return Err("No file chooser available, install xdg-desktop-portal-gtk or zenity".into());
+    }
+
+    Ok(directory.map(|directory| directory.path().to_string_lossy().into_owned()))
 }
 
 /// Opens a terminal running `dockerclaude bash` for the given prefix.

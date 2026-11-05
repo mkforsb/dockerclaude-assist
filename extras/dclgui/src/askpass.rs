@@ -4,12 +4,16 @@
 //! prompt as its argument and reads the password from its stdout. That program
 //! is this one, see [`crate::dc::ASKPASS_ENV`].
 
-use iced::widget::{Id, button, column, container, operation, row, space, text, text_input};
-use iced::{Element, window};
+use iced::theme::Mode;
+use iced::widget::{Id, button, column, container, operation, row, text, text_input};
+use iced::{Element, Fill, Task, Theme, window};
+
+use crate::style;
 
 struct Askpass {
     prompt: String,
     password: String,
+    mode: Mode,
 }
 
 #[derive(Debug, Clone)]
@@ -17,6 +21,7 @@ enum Message {
     Input(String),
     Submit,
     Cancel,
+    ThemeChanged(Mode),
 }
 
 fn input_id() -> Id {
@@ -31,30 +36,36 @@ fn update(state: &mut Askpass, message: Message) {
             std::process::exit(0);
         }
         Message::Cancel => std::process::exit(1),
+        Message::ThemeChanged(mode) => state.mode = mode,
     }
 }
 
 fn view(state: &Askpass) -> Element<'_, Message> {
+    let response = |label| button(text(label).width(Fill).center()).width(Fill);
+
     container(
         column![
-            text(&state.prompt),
+            text(&state.prompt).width(Fill).center(),
             text_input("", &state.password)
                 .id(input_id())
                 .secure(true)
+                .padding(8)
+                .style(style::entry)
                 .on_input(Message::Input)
                 .on_submit(Message::Submit),
             row![
-                space::horizontal(),
-                button("Cancel")
-                    .style(button::secondary)
+                response("Cancel")
+                    .style(style::regular)
                     .on_press(Message::Cancel),
-                button("OK").on_press(Message::Submit),
+                response("OK")
+                    .style(style::suggested)
+                    .on_press(Message::Submit),
             ]
-            .spacing(8),
+            .spacing(12),
         ]
-        .spacing(12),
+        .spacing(14),
     )
-    .padding(16)
+    .padding(20)
     .into()
 }
 
@@ -65,15 +76,21 @@ pub fn run(prompt: String) -> iced::Result {
             let state = Askpass {
                 prompt: prompt.clone(),
                 password: String::new(),
+                mode: Mode::None,
             };
-            (state, operation::focus(input_id()))
+            let task = Task::batch([
+                operation::focus(input_id()),
+                iced::system::theme().map(Message::ThemeChanged),
+            ]);
+            (state, task)
         },
         update,
         view,
     )
     .title("dclgui: sudo password")
+    .theme(|state: &Askpass| -> Theme { style::theme(state.mode) })
     .window(window::Settings {
-        size: (420.0, 150.0).into(),
+        size: (420.0, 170.0).into(),
         resizable: false,
         ..window::Settings::default()
     })

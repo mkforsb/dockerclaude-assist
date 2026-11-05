@@ -35,9 +35,19 @@ of problems is shown next to the tab.
 | Bash                   | `bash`, in an `x-terminal-emulator`             |
 | Rename                 | `rename-session <old> <new>`                    |
 | x (mount)              | `umount <path>`, or `force-clean-mounts <slug>` if broken |
-| + Add mount            | `mount <path> [<session>]`                      |
-| + Add session w/ mount | `mount <path> <session>`                        |
-| + Add prefix           | `start-container` with the new `DCPREFIX`       |
+| Add mount              | `mount <path> [<session>]`                      |
+| Add session w/ mount   | `mount <path> <session>`                        |
+| Add prefix             | `start-container` with the new `DCPREFIX`       |
+
+Directories to mount are chosen with the desktop's file chooser, by way of
+`xdg-desktop-portal`, or else `zenity` if there is no portal.
+
+## Look
+
+`src/style.rs` approximates libadwaita, following the system's light or dark
+preference where the desktop portal reports one. Accent blue is kept to the
+default action of a dialog and focused entries, and red to destructive
+confirmations and errors.
 
 ## sudo
 
