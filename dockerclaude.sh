@@ -228,7 +228,7 @@ function start_session_streaming {
     trap "release_mount $(printf '%q' "${targetDir}")" EXIT
 
     docker compose -f "${DCDIR}/docker-compose.yml" exec -i dockerclaude \
-        bash -lc "umask 002 && cd /mnt/$(slugify "${targetDir}") && claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --permission-prompt-tool stdio --permission-mode default --disallowedTools AskUserQuestion"
+        bash -lc "umask 002 && cd /mnt/$(slugify "${targetDir}") && claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --permission-prompt-tool stdio --permission-mode auto --disallowedTools AskUserQuestion"
 }
 
 # Renames session $1 to $2, i.e. moves all mounts of `session:$1` and
