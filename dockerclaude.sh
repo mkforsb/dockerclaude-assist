@@ -27,12 +27,22 @@ function bound_source {
     [ "$(slugify "${hostPath}")" == "$2" ] && echo "${hostPath}"
 }
 
+# Runs `docker compose exec` with the arguments given, passing the terminal
+# variables of the calling shell. docker-compose.yml also passes them, but only
+# when the container is created, so a container created without a terminal
+# (e.g. from dclgui) would otherwise lack them in every session: no colors and
+# no Shift-Enter in Claude Code. Variables unset here are not passed.
+function compose_exec {
+    docker compose -f "${DCDIR}/docker-compose.yml" exec \
+        -e TERM -e TERM_PROGRAM -e TERM_PROGRAM_VERSION -e COLORTERM -e TMUX "$@"
+}
+
 function perform_install {
     if [ -f "$DCDIR/installers/${1}.sh" ]; then
-        docker compose -f "${DCDIR}/docker-compose.yml" exec -it dockerclaude \
+        compose_exec -it dockerclaude \
             bash -lc "umask 002 && /installers/${1}.sh"
     else
-        docker compose -f "${DCDIR}/docker-compose.yml" exec -it dockerclaude \
+        compose_exec -it dockerclaude \
             bash -lc "umask 002 && apt update && apt install -y $*"
     fi
 }
@@ -211,7 +221,7 @@ function start_session {
     # the session is interrupted or the exec fails.
     trap "release_mount $(printf '%q' "${targetDir}")" EXIT
 
-    docker compose -f "${DCDIR}/docker-compose.yml" exec -it dockerclaude \
+    compose_exec -it dockerclaude \
         bash -lc "umask 002 && cd /mnt/$(slugify "${targetDir}") && claude"
 }
 
@@ -697,9 +707,9 @@ elif [ "${1:-}" == "prefix?" ]; then
     fi
 elif [ "${1:-}" == "exec" ]; then
     shift
-    docker compose -f "${DCDIR}/docker-compose.yml" exec -it dockerclaude bash -lc 'umask 002 && exec "$@"' bash "$@"
+    compose_exec -it dockerclaude bash -lc 'umask 002 && exec "$@"' bash "$@"
 elif [ "${1:-}" == "bash" ]; then
-    docker exec -it "${DCPREFIX}dockerclaude" bash
+    compose_exec -it dockerclaude bash
 elif [ "${1:-}" == "dir" ]; then
     shift
     echo "${DCDIR}"
