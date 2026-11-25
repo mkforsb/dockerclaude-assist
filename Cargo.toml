@@ -1,0 +1,14 @@
+[package]
+name = "dockerclaude"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.9", features = ["derive", "env", "wrap_help"] }
+libc = "0.2.191"
+owo-colors = { version = "4.4.0", features = ["supports-colors"] }
+serde_json = "1.0.154"
+
+[profile.release]
+strip = true
